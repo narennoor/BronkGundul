@@ -54,11 +54,16 @@ function writeUserConfig(nextConfig) {
 }
 
 function readCache() {
-  return readJson(CACHE_PATH, {
+  const cache = readJson(CACHE_PATH, {
     sharedLessons: [],
+    pendingLessons: [],
     presets: [],
     pulledAt: null,
+    reviewedAt: null,
   });
+  if (!Array.isArray(cache.pendingLessons)) cache.pendingLessons = [];
+  if (!Array.isArray(cache.sharedLessons)) cache.sharedLessons = [];
+  return cache;
 }
 
 function writeCache(nextCache) {
@@ -83,6 +88,9 @@ export function getHiveMindPullMode() {
 }
 
 export function isHiveMindEnabled() {
+  // re-enabled by operator 2026-07-06 WITH a review gate: pulled lessons land
+  // in pendingLessons and never reach a prompt until approved via
+  // `node cli.js hive approve` (see listPendingHiveLessons / approveHiveLessons)
   return !!(getBaseUrl() && getApiKey());
 }
 
@@ -186,6 +194,33 @@ export async function registerHiveMindAgent({ reason = "heartbeat" } = {}) {
   }
 }
 
+// Patterns that suggest a shared lesson is trying to steer the agent rather
+// than share trading knowledge. Flagged for the operator, not auto-dropped.
+const SUSPICIOUS_LESSON_PATTERNS = [
+  /ignore (all|any|previous|prior|the)/i,
+  /disregard/i,
+  /override/i,
+  /system prompt/i,
+  /new instruction/i,
+  /private key/i,
+  /seed phrase/i,
+  /mnemonic/i,
+  /transfer (all|sol|funds|token)/i,
+  /send (all|sol|funds|everything)/i,
+  /withdraw (all|everything)/i,
+  /https?:\/\//i,
+  /(always|must|immediately) deploy/i,
+  /self[_ ]?update/i,
+  /update[_ ]?config/i,
+  /(disable|turn off|remove) (stop|safety|limit|dry)/i,
+];
+
+function flagSuspiciousLesson(rule) {
+  return SUSPICIOUS_LESSON_PATTERNS
+    .filter((re) => re.test(String(rule || "")))
+    .map((re) => re.source);
+}
+
 export async function pullHiveMindLessons(limit = 12) {
   if (!isHiveMindEnabled()) return null;
   try {
@@ -193,16 +228,76 @@ export async function pullHiveMindLessons(limit = 12) {
       query: { agentId: getAgentId(), limit },
     });
     const cache = readCache();
-    cache.sharedLessons = Array.isArray(payload?.lessons)
-      ? payload.lessons.map(normalizeSharedLesson).filter(Boolean)
-      : [];
+    const known = new Set([
+      ...cache.sharedLessons.map((lesson) => lesson.id),
+      ...cache.pendingLessons.map((lesson) => lesson.id),
+    ]);
+    const incoming = (Array.isArray(payload?.lessons) ? payload.lessons : [])
+      .map(normalizeSharedLesson)
+      .filter(Boolean)
+      .filter((lesson) => !known.has(lesson.id))
+      .map((lesson) => ({ ...lesson, suspicious_flags: flagSuspiciousLesson(lesson.rule) }));
+    // Review gate: pulled lessons are staged as pending — they never reach a
+    // prompt until the operator approves them (cli.js `hive approve`).
+    cache.pendingLessons.push(...incoming);
     cache.pulledAt = new Date().toISOString();
     writeCache(cache);
-    return cache.sharedLessons;
+    return incoming;
   } catch (error) {
     log("hivemind_warn", `Lesson pull failed: ${error.message}`);
     return null;
   }
+}
+
+export function listPendingHiveLessons() {
+  const cache = readCache();
+  return {
+    pulledAt: cache.pulledAt,
+    pending: cache.pendingLessons.map((lesson) => ({
+      id: lesson.id,
+      rule: lesson.rule,
+      role: lesson.role,
+      score: lesson.score,
+      tags: lesson.tags,
+      suspicious_flags: lesson.suspicious_flags || [],
+    })),
+    approved_count: cache.sharedLessons.length,
+  };
+}
+
+export function approveHiveLessons(ids) {
+  const cache = readCache();
+  const approveAll = ids === "all";
+  const idSet = approveAll ? null : new Set(Array.isArray(ids) ? ids : [ids]);
+  const approved = [];
+  cache.pendingLessons = cache.pendingLessons.filter((lesson) => {
+    if (approveAll || idSet.has(lesson.id)) {
+      const { suspicious_flags, ...clean } = lesson;
+      approved.push({ ...clean, approvedAt: new Date().toISOString() });
+      return false;
+    }
+    return true;
+  });
+  cache.sharedLessons.push(...approved);
+  cache.reviewedAt = new Date().toISOString();
+  writeCache(cache);
+  log("hivemind", `Operator approved ${approved.length} shared lesson(s)`);
+  return { approved: approved.length, remaining_pending: cache.pendingLessons.length };
+}
+
+export function rejectHiveLessons(ids) {
+  const cache = readCache();
+  const rejectAll = ids === "all";
+  const idSet = rejectAll ? null : new Set(Array.isArray(ids) ? ids : [ids]);
+  const before = cache.pendingLessons.length;
+  cache.pendingLessons = cache.pendingLessons.filter(
+    (lesson) => !(rejectAll || idSet.has(lesson.id)),
+  );
+  cache.reviewedAt = new Date().toISOString();
+  writeCache(cache);
+  const rejected = before - cache.pendingLessons.length;
+  log("hivemind", `Operator rejected ${rejected} shared lesson(s)`);
+  return { rejected, remaining_pending: cache.pendingLessons.length };
 }
 
 export async function pullHiveMindPresets() {
@@ -339,7 +434,9 @@ export async function pushHivePerformanceEvent(perf) {
     return await requestJson("/api/hivemind/performance/push", {
       method: "POST",
       body: {
-        eventId: sanitizeText(perf.eventId, 200) || `close:${getAgentId()}:${perf.position || perf.pool}:${perf.recorded_at || Date.now()}`,
+        // position address is hashed — a raw address would let the server link
+        // this agentId to the operator wallet on-chain
+        eventId: sanitizeText(perf.eventId, 200) || `close:${getAgentId()}:${crypto.createHash("sha256").update(String(perf.position || perf.pool || "")).digest("hex").slice(0, 16)}:${perf.recorded_at || Date.now()}`,
         agentId: getAgentId(),
         version: AGENT_VERSION,
         timestamp: perf.recorded_at || new Date().toISOString(),

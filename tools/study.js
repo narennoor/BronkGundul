@@ -1,5 +1,38 @@
 import { agentMeridianJson, getAgentMeridianHeaders } from "./agent-meridian.js";
 
+// ── Server-response sanitizers ──────────────────────────────────────
+// Everything this module returns ends up in LLM prompts. Server strings are
+// never passed through raw: owners must be base58, labels are reduced to a
+// single lowercase token, names are stripped of markup/newlines and capped.
+const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+function safeOwner(value) {
+  const s = String(value || "").trim();
+  return BASE58_RE.test(s) ? s : null;
+}
+
+function safeLabel(value, maxLen = 24) {
+  if (typeof value !== "string") return null;
+  const s = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_+\-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, maxLen);
+  return s || null;
+}
+
+function safeName(value, maxLen = 48) {
+  if (typeof value !== "string") return null;
+  const s = value
+    .replace(/[\r\n\t<>`]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLen);
+  return s || null;
+}
+
 export async function studyTopLPers({ pool_address, limit = 4 }) {
   const [poolRes, signalRes] = await Promise.all([
     fetchTopLp(pool_address),
@@ -24,13 +57,17 @@ export async function studyTopLPers({ pool_address, limit = 4 }) {
   const historicalMap = new Map(historicalOwners.map((owner) => [owner.owner, owner]));
 
   const lpers = ranked.map((owner) => {
+    const ownerAddress = safeOwner(owner.owner);
+    if (!ownerAddress) return null; // untrusted row — owner must be a valid base58 address
     const history = historicalMap.get(owner.owner);
+    const preferredStrategy = safeLabel(history?.preferredStrategy);
+    const preferredRangeStyle = safeLabel(history?.preferredRangeStyle);
     return {
-      owner: owner.owner,
-      owner_short: owner.ownerShort || `${owner.owner.slice(0, 8)}...`,
+      owner: ownerAddress,
+      owner_short: `${ownerAddress.slice(0, 8)}...`,
       signal_tags: [
-        history?.preferredStrategy ? `strategy:${history.preferredStrategy}` : null,
-        history?.preferredRangeStyle ? `range:${history.preferredRangeStyle}` : null,
+        preferredStrategy ? `strategy:${preferredStrategy}` : null,
+        preferredRangeStyle ? `range:${preferredRangeStyle}` : null,
       ].filter(Boolean),
       summary: {
         total_positions: owner.totalLp || history?.topPositions?.length || 0,
@@ -44,20 +81,20 @@ export async function studyTopLPers({ pool_address, limit = 4 }) {
         win_rate: round((owner.winRatePct ?? 0) / 100, 2),
         roi: round((owner.roiPct ?? 0) / 100, 4),
         fee_pct_of_capital: round(owner.feePercent ?? 0, 2),
-        preferred_strategy: history?.preferredStrategy || "unknown",
-        preferred_range_style: history?.preferredRangeStyle || "unknown",
+        preferred_strategy: preferredStrategy || "unknown",
+        preferred_range_style: preferredRangeStyle || "unknown",
       },
       positions: Array.isArray(history?.topPositions)
         ? history.topPositions.map((position) => ({
             pool: pool_address,
-            pair: poolData.overview?.name || "Unknown pool",
+            pair: safeName(poolData.overview?.name) || "Unknown pool",
             hold_hours: round(position.ageHours ?? 0, 2),
             pnl_usd: round(position.pnlUsd ?? 0, 2),
             pnl_pct: fmtPct(position.pnlPct),
             fee_usd: round(position.feeUsd ?? 0, 2),
             in_range_pct: position.inRange == null ? null : position.inRange ? 100 : 0,
-            strategy: position.strategy || null,
-            closed_reason: position.rangeStyle || null,
+            strategy: safeLabel(position.strategy),
+            closed_reason: safeLabel(position.rangeStyle),
             balance_usd: round(position.inputValue ?? 0, 2),
             fee_per_tvl_24h_pct: round(position.feePercent ?? 0, 2),
             range_width_pct: position.widthBins ?? null,
@@ -69,17 +106,19 @@ export async function studyTopLPers({ pool_address, limit = 4 }) {
     };
   });
 
+  const sanitizedLpers = lpers.filter(Boolean);
+
   const patterns = buildPatterns(ranked, historicalOwners, signalData, poolData.overview || {});
 
   return {
     pool: pool_address,
     pool_name:
-      poolData.overview?.name ||
-      `${poolData.overview?.tokenXSymbol || "TOKEN"}-${poolData.overview?.tokenYSymbol || "SOL"}`,
+      safeName(poolData.overview?.name) ||
+      `${safeName(poolData.overview?.tokenXSymbol, 16) || "TOKEN"}-${safeName(poolData.overview?.tokenYSymbol, 16) || "SOL"}`,
     message:
       "LPAgent-backed top LP study from Agent Meridian 30m cached owner aggregates plus owner historical positions.",
     patterns,
-    lpers,
+    lpers: sanitizedLpers,
   };
 }
 
@@ -100,14 +139,14 @@ function buildPatterns(ranked, historicalOwners, signalData, overview) {
   const avgOpenPnlPct = avg(ranked.map((o) => o.pnlPerInflowPct).filter(isNum));
   const avgFeePct = avg(ranked.map((o) => o.feePercent).filter(isNum));
   const avgRoiPct = avg(ranked.map((o) => o.roiPct).filter(isNum));
-  const preferredStrategies = countValues(historicalOwners.map((o) => o.preferredStrategy).filter(Boolean));
-  const preferredRanges = countValues(historicalOwners.map((o) => o.preferredRangeStyle).filter(Boolean));
+  const preferredStrategies = countValues(historicalOwners.map((o) => safeLabel(o.preferredStrategy)).filter(Boolean));
+  const preferredRanges = countValues(historicalOwners.map((o) => safeLabel(o.preferredRangeStyle)).filter(Boolean));
 
   return {
     top_lper_count: ranked.length,
     study_mode: "lpagent_top_lpers",
     pool_name:
-      overview.name || `${overview.tokenXSymbol || "TOKEN"}-${overview.tokenYSymbol || "SOL"}`,
+      safeName(overview.name) || `${safeName(overview.tokenXSymbol, 16) || "TOKEN"}-${safeName(overview.tokenYSymbol, 16) || "SOL"}`,
     active_position_count: signalData.activePositionCount ?? ranked.length,
     owner_count: signalData.ownerCount ?? ranked.length,
     avg_hold_hours: round(avgHold, 2),
@@ -119,8 +158,17 @@ function buildPatterns(ranked, historicalOwners, signalData, overview) {
     holder_count: ranked.filter((o) => (o.avgAgeHours || 0) >= 4).length,
     preferred_strategies: preferredStrategies,
     preferred_range_styles: preferredRanges,
-    top_historical_owners: (signalData.topHistoricalOwners || []).slice(0, 3),
-    suggested_style: signalData.suggestedStyle || null,
+    // raw server objects are never passed through — reduced to typed fields
+    top_historical_owners: (signalData.topHistoricalOwners || [])
+      .slice(0, 3)
+      .map((o) => ({
+        owner: safeOwner(o?.owner),
+        preferred_strategy: safeLabel(o?.preferredStrategy),
+        avg_pnl_pct: round(o?.avgPnlPct, 2),
+        avg_hold_hours: round(o?.avgHoldHours, 2),
+      }))
+      .filter((o) => o.owner),
+    suggested_style: safeLabel(signalData.suggestedStyle),
   };
 }
 

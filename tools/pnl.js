@@ -137,6 +137,21 @@ async function getMeteoraData(conn, walletAddress, flat) {
       data = cached.byPosition;
     } else {
       data = await fetchDlmmPnlForPool(pool, walletAddress);
+      // Meteora datapi occasionally serves an empty/zeroed 200. Deposits change
+      // only on our own txs, so the previous snapshot is still correct — backfill
+      // it instead of caching the bad response, which would suppress
+      // STOP_LOSS/TRAILING_TP (suspicious ticks) for a full TTL window.
+      if (cached?.byPosition) {
+        const hasDeposits = (d) =>
+          safeNum(d?.allTimeDeposits?.total?.usd) > 0 || safeNum(d?.allTimeDeposits?.total?.sol) > 0;
+        for (const addr of positionAddrs) {
+          const prev = cached.byPosition[addr];
+          if (prev && hasDeposits(prev) && !hasDeposits(data[addr])) {
+            data[addr] = prev;
+            log("pnl_api", `Backfilled stale deposits for ${addr.slice(0, 8)} — fresh Meteora response was empty/zeroed`);
+          }
+        }
+      }
       _meteoraCache.set(pool, { at: Date.now(), byPosition: data, sigByPosition });
     }
     for (const addr of positionAddrs) byPosition[addr] = data[addr] || null;

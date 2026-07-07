@@ -107,6 +107,12 @@ Studies top LPers on a pool. Returns behaviour patterns, hold times, win rates, 
 Output: { pool, patterns: {top_lper_count, avg_hold_hours, avg_win_rate, ...}, lpers: [{owner, summary, positions}] }
 \`\`\`
 
+### meridian hive <pull|pending|approve|reject> [ids|all] [--limit N]
+HiveMind shared-lesson review gate. \`pull\` stages lessons as pending, \`pending\` lists them (with suspicious-pattern flags), \`approve\`/\`reject\` decide what may enter prompts.
+\`\`\`
+Output: { pulled, flagged_suspicious } | { pending: [{id, rule, suspicious_flags}] } | { approved, remaining_pending }
+\`\`\`
+
 ### meridian token-info --query <mint_or_symbol>
 Returns token audit, mcap, launchpad, price stats, fee data.
 \`\`\`
@@ -522,6 +528,30 @@ switch (subcommand) {
     const { studyTopLPers } = await import("./tools/study.js");
     const limit = flags.limit ? parseInt(flags.limit) : 4;
     out(await studyTopLPers({ pool_address: flags.pool, limit }));
+    break;
+  }
+
+  // ── hive (pull + review gate) ────────────────────────────────────
+  case "hive": {
+    const hive = await import("./hivemind.js");
+    if (sub2 === "pull") {
+      const pulled = await hive.pullHiveMindLessons(flags.limit ? parseInt(flags.limit) : 12);
+      if (pulled === null) die("HiveMind disabled or pull failed (check logs)");
+      out({
+        pulled: pulled.length,
+        flagged_suspicious: pulled.filter(l => (l.suspicious_flags || []).length > 0).length,
+        note: "Review with: meridian hive pending — nothing reaches a prompt until approved",
+      });
+    } else if (sub2 === "pending") {
+      out(hive.listPendingHiveLessons());
+    } else if (sub2 === "approve" || sub2 === "reject") {
+      const ids = argv.filter(a => !a.startsWith("-")).slice(2);
+      if (!ids.length) die(`Usage: meridian hive ${sub2} <lesson-id...|all>`);
+      const target = ids.includes("all") ? "all" : ids;
+      out(sub2 === "approve" ? hive.approveHiveLessons(target) : hive.rejectHiveLessons(target));
+    } else {
+      die("Usage: meridian hive <pull|pending|approve|reject> [ids|all] [--limit N]");
+    }
     break;
   }
 

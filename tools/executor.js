@@ -23,7 +23,7 @@ import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
-import { execSync, spawn } from "child_process";
+import { execSync } from "child_process";
 import { REPO_ROOT, repoPath } from "../repo-root.js";
 import { normalizeTimeframe, scaleScreeningToTimeframe } from "../screening-scales.js";
 
@@ -274,27 +274,33 @@ const toolMap = {
     return { saved: true, position: position_address, instruction: instruction || null };
   },
   self_update: async () => {
+    // operator policy (2026-07-06): CHECK-ONLY. Fetches the remote and reports
+    // pending upstream commits, never pulls or restarts — an unattended
+    // `git pull` is an RCE path (compromised upstream runs arbitrary code on
+    // the wallet machine) and would also overwrite the local security patches.
+    // The operator reviews the diff and updates manually.
     try {
-      const result = execSync("git pull", { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-      if (result.includes("Already up to date")) {
-        return { success: true, updated: false, message: "Already up to date — no restart needed." };
+      execSync("git fetch --quiet", { cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000 });
+      let range = "HEAD..@{upstream}";
+      try {
+        execSync("git rev-parse --abbrev-ref --symbolic-full-name @{upstream}", { cwd: REPO_ROOT, encoding: "utf8", stdio: "pipe" });
+      } catch {
+        range = "HEAD..origin/main";
       }
-      // Delay restart so this tool response (and Telegram message) gets sent first
-      setTimeout(() => {
-        if (!process.env.pm_id) {
-          const child = spawn(process.execPath, process.argv.slice(1), {
-            detached: true,
-            stdio: "inherit",
-            cwd: REPO_ROOT,
-          });
-          child.unref();
-        }
-        process.exit(0);
-      }, 3000);
-      const restartMode = process.env.pm_id
-        ? "PM2 detected — exiting in 3s so PM2 can restart the managed process."
-        : "Restarting in 3s...";
-      return { success: true, updated: true, message: `Updated! ${restartMode}\n${result}` };
+      const behind = Number(execSync(`git rev-list --count ${range}`, { cwd: REPO_ROOT, encoding: "utf8" }).trim());
+      if (!behind) {
+        return { success: true, updated: false, check_only: true, behind: 0, message: "Already up to date with upstream." };
+      }
+      const commits = execSync(`git log --oneline ${range}`, { cwd: REPO_ROOT, encoding: "utf8" })
+        .trim().split("\n").slice(0, 20);
+      return {
+        success: true,
+        updated: false,
+        check_only: true,
+        behind,
+        pending_commits: commits,
+        message: `${behind} new upstream commit(s) available. Auto-apply is disabled by operator policy — review the diff and update manually (a blind git pull would also overwrite the local security patches).`,
+      };
     } catch (e) {
       return { success: false, error: e.message };
     }

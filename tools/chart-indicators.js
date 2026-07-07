@@ -251,7 +251,9 @@ export async function confirmIndicatorPreset({
         confirmed: !!evaluation.confirmed,
         reason: evaluation.reason,
         signal: evaluation.signal,
-        latest: payload?.latest || null,
+        // raw payload.latest deliberately NOT passed through — only the
+        // safeNumber-coerced `signal` summary may leave this module
+        latest: null,
       });
     } catch (error) {
       log("indicators_warn", `Indicator fetch failed for ${mint.slice(0, 8)} ${interval}: ${error.message}`);

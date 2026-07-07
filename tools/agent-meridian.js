@@ -63,7 +63,14 @@ async function agentMeridianJsonOnce(pathname, options = {}, timeoutMs = null) {
     payload = { raw: text };
   }
   if (!res.ok) {
-    const error = new Error(payload?.error || `${pathname} ${res.status}`);
+    // Server-controlled error text can end up in logs/decision entries that
+    // are later echoed into LLM prompts — strip newlines/markup and cap length.
+    const serverMessage = String(payload?.error || "")
+      .replace(/[\r\n\t<>`]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 160);
+    const error = new Error(serverMessage || `${pathname} ${res.status}`);
     error.status = res.status;
     error.payload = payload;
     error.retryAfter = res.headers.get("retry-after");
@@ -72,7 +79,23 @@ async function agentMeridianJsonOnce(pathname, options = {}, timeoutMs = null) {
   return payload;
 }
 
+// Operator allowlist (2026-07-06): only endpoints whose responses are strictly
+// coerced to numbers/enums/validated strings by their caller may pass.
+// Still blocked: zap relay (/execution/*) — the agent would blind-sign
+// server-built transactions (wallet-drain risk) — and raw positions
+// (/positions/open/raw) — third-party PnL feeding close decisions + links
+// wallet to agentId.
+const OPERATOR_ALLOWED_PATHS = [
+  /^\/chart-indicators\//, // numeric OHLCV indicators; safeNumber-coerced in tools/chart-indicators.js
+  /^\/top-lp\//,           // top-LPer aggregates; sanitized in tools/study.js (safeOwner/safeLabel/safeName)
+  /^\/study-top-lp\//,     // LPer signal aggregates; sanitized in tools/study.js
+];
+
 export async function agentMeridianJson(pathname, options = {}) {
+  const cleanPath = String(pathname || "");
+  if (!OPERATOR_ALLOWED_PATHS.some((re) => re.test(cleanPath))) {
+    throw new Error(`agentmeridian API blocked by operator allowlist: ${cleanPath.split("?")[0]}`);
+  }
   const { retry, ...fetchOptions } = options;
   if (!retry) {
     return agentMeridianJsonOnce(pathname, fetchOptions);
