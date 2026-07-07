@@ -221,6 +221,12 @@ function flagSuspiciousLesson(rule) {
     .map((re) => re.source);
 }
 
+// The hive re-broadcasts the same lesson under fresh ids (different source
+// agent, same event) — dedup must key on the rule text, not just the id.
+function normalizeRuleText(rule) {
+  return String(rule || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 export async function pullHiveMindLessons(limit = 12) {
   if (!isHiveMindEnabled()) return null;
   try {
@@ -232,10 +238,14 @@ export async function pullHiveMindLessons(limit = 12) {
       ...cache.sharedLessons.map((lesson) => lesson.id),
       ...cache.pendingLessons.map((lesson) => lesson.id),
     ]);
+    const knownRules = new Set([
+      ...cache.sharedLessons.map((lesson) => normalizeRuleText(lesson.rule)),
+      ...cache.pendingLessons.map((lesson) => normalizeRuleText(lesson.rule)),
+    ]);
     const incoming = (Array.isArray(payload?.lessons) ? payload.lessons : [])
       .map(normalizeSharedLesson)
       .filter(Boolean)
-      .filter((lesson) => !known.has(lesson.id))
+      .filter((lesson) => !known.has(lesson.id) && !knownRules.has(normalizeRuleText(lesson.rule)))
       .map((lesson) => ({ ...lesson, suspicious_flags: flagSuspiciousLesson(lesson.rule) }));
     // Review gate: pulled lessons are staged as pending — they never reach a
     // prompt until the operator approves them (cli.js `hive approve`).
@@ -269,15 +279,24 @@ export function approveHiveLessons(ids) {
   const cache = readCache();
   const approveAll = ids === "all";
   const idSet = approveAll ? null : new Set(Array.isArray(ids) ? ids : [ids]);
+  const approvedRules = new Set(cache.sharedLessons.map((lesson) => normalizeRuleText(lesson.rule)));
   const approved = [];
+  let duplicates = 0;
   cache.pendingLessons = cache.pendingLessons.filter((lesson) => {
     if (approveAll || idSet.has(lesson.id)) {
+      const ruleKey = normalizeRuleText(lesson.rule);
+      if (approvedRules.has(ruleKey)) {
+        duplicates += 1; // same rule already approved — drop instead of double-injecting into prompts
+        return false;
+      }
+      approvedRules.add(ruleKey);
       const { suspicious_flags, ...clean } = lesson;
       approved.push({ ...clean, approvedAt: new Date().toISOString() });
       return false;
     }
     return true;
   });
+  if (duplicates > 0) log("hivemind", `Dropped ${duplicates} duplicate lesson(s) already in sharedLessons`);
   cache.sharedLessons.push(...approved);
   cache.reviewedAt = new Date().toISOString();
   writeCache(cache);

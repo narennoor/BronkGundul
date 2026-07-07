@@ -357,6 +357,22 @@ export async function runManagementCycle({ silent = false } = {}) {
   return mgmtReport;
 }
 
+// Dedup guard: consecutive screening skips with the same reason (e.g. wallet
+// fully deployed for hours) write ONE decision-log entry instead of one per
+// cycle — 7× "Insufficient SOL (0.000 < 0.7)" was crowding the 100-entry log.
+let _lastScreeningSkipReason = null;
+
+function appendScreeningSkipOnce(reason) {
+  if (reason === _lastScreeningSkipReason) return;
+  _lastScreeningSkipReason = reason;
+  appendDecision({
+    type: "skip",
+    actor: "SCREENER",
+    summary: "Screening skipped",
+    reason,
+  });
+}
+
 export async function runScreeningCycle({ silent = false } = {}) {
   if (_screeningBusy) {
     log("cron", "Screening skipped — previous cycle still running");
@@ -374,12 +390,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     if (prePositions.total_positions >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
       screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
-      appendDecision({
-        type: "skip",
-        actor: "SCREENER",
-        summary: "Screening skipped",
-        reason: `Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`,
-      });
+      appendScreeningSkipOnce(`Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
       _screeningBusy = false;
       return screenReport;
     }
@@ -388,12 +399,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     if (!isDryRun && preBalance.sol < minRequired) {
       log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
       screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
-      appendDecision({
-        type: "skip",
-        actor: "SCREENER",
-        summary: "Screening skipped",
-        reason: `Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`,
-      });
+      appendScreeningSkipOnce(`Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`);
       _screeningBusy = false;
       return screenReport;
     }
@@ -403,6 +409,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     _screeningBusy = false;
     return screenReport;
   }
+  _lastScreeningSkipReason = null; // guards passed — next skip streak logs fresh
   if (!silent && telegramEnabled()) {
     liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...");
   }

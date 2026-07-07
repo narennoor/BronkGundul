@@ -37,7 +37,10 @@ export function scoreCandidate(pool) {
   const organic = Number(pool.organic_score || 0);
   const volume = Number(pool.volume_window || 0);
   const holders = Number(pool.holders || 0);
-  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+  // fee_tvl multiplier halved 1000→500 (2026-07-07): Darwin decayed
+  // fee_tvl_ratio to 0.77 over 7 straight recalcs — entry-time fee/TVL was
+  // the least predictive signal, yet it dominated candidate ranking.
+  return feeTvl * 500 + organic * 10 + volume / 100 + holders / 100;
 }
 
 /**
