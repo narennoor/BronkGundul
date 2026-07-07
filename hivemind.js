@@ -301,7 +301,7 @@ export function approveHiveLessons(ids) {
   cache.reviewedAt = new Date().toISOString();
   writeCache(cache);
   log("hivemind", `Operator approved ${approved.length} shared lesson(s)`);
-  return { approved: approved.length, remaining_pending: cache.pendingLessons.length };
+  return { approved: approved.length, duplicates_dropped: duplicates, remaining_pending: cache.pendingLessons.length };
 }
 
 export function rejectHiveLessons(ids) {
