@@ -946,6 +946,25 @@ function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
+  // Rule 6 — max-hold guard. Stale positions bleed in-range without tripping any other rule
+  // (OOR/pumped/low-yield need price to leave the range; stop-loss only fires after a big loss).
+  // Time-based, so the hard cap can fire even when PnL is unpriced/suspect. The negative-PnL
+  // variant is gated on a trusted PnL read.
+  const ageMin = position.age_minutes ?? 0;
+  const maxHold = managementConfig.maxHoldMinutes ?? 240;
+  const maxHoldNeg = managementConfig.maxHoldMinutesIfNegative ?? 120;
+  if (maxHold > 0 && ageMin >= maxHold) {
+    return { action: "CLOSE", rule: 6, reason: `max hold ${maxHold}m reached` };
+  }
+  if (
+    maxHoldNeg > 0 &&
+    ageMin >= maxHoldNeg &&
+    !pnlSuspect &&
+    position.pnl_pct != null &&
+    position.pnl_pct < 0
+  ) {
+    return { action: "CLOSE", rule: 6, reason: `held ${maxHoldNeg}m+ still negative` };
+  }
   return null;
 }
 

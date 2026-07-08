@@ -384,6 +384,8 @@ const toolMap = {
       autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
+      maxHoldMinutes: ["management", "maxHoldMinutes"],
+      maxHoldMinutesIfNegative: ["management", "maxHoldMinutesIfNegative"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
       repeatDeployCooldownEnabled: ["management", "repeatDeployCooldownEnabled"],

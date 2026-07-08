@@ -120,6 +120,11 @@ export const config = {
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
+    // Max-hold guard — data (66 closes) shows positions held >120m avg -11% PnL; the two
+    // worst blow-ups bled in-range for 9-14h without ever tripping OOR/low-yield. Force-close
+    // stale positions before they become tail losses. 0 disables.
+    maxHoldMinutes:         u.maxHoldMinutes         ?? 240, // hard close at 4h regardless of PnL
+    maxHoldMinutesIfNegative: u.maxHoldMinutesIfNegative ?? 120, // close at 2h if still underwater
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
     gasReserve:            u.gasReserve            ?? 0.2,
