@@ -149,6 +149,44 @@ export async function sendMessage(text) {
   return postTelegram("sendMessage", { text: String(text).slice(0, 4096) });
 }
 
+// ─── Markdown → Telegram HTML ────────────────────────────────────
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// Telegram has no markdown-compatible parse mode for LLM output (**bold**,
+// ### headings), so convert the common constructs to Telegram HTML.
+export function markdownToTelegramHtml(text) {
+  const stash = [];
+  // NUL sentinels cannot occur in LLM/user text, so stashed HTML is never clobbered
+  const keep = (html) => `\u0000${stash.push(html) - 1}\u0000`;
+  let out = String(text).replace(/\u0000/g, "");
+  out = out.replace(/```(?:\w+)?\n?([\s\S]*?)```/g, (_, code) =>
+    keep(`<pre>${escapeHtml(code.replace(/\n$/, ""))}</pre>`));
+  out = escapeHtml(out);
+  out = out.replace(/`([^`\n]+)`/g, (_, code) => keep(`<code>${code}</code>`));
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+  out = out.replace(/^#{1,6}\s+(.+)$/gm, "<b>$1</b>");
+  out = out.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
+  out = out.replace(/\u0000(\d+)\u0000/g, (_, i) => stash[Number(i)]);
+  return out;
+}
+
+/** Send markdown-ish LLM output as formatted HTML; falls back to plain text on parse failure. */
+export async function sendMarkdown(text) {
+  if (!TOKEN || !chatId) return;
+  const plain = String(text).slice(0, 4096);
+  const html = markdownToTelegramHtml(plain);
+  if (html.length <= 4096) {
+    const sent = await postTelegram("sendMessage", { text: html, parse_mode: "HTML" });
+    if (sent) return sent;
+  }
+  return postTelegram("sendMessage", { text: plain });
+}
+
 export async function sendMessageWithButtons(text, inlineKeyboard) {
   if (!TOKEN || !chatId) return;
   return postTelegram("sendMessage", {
@@ -296,12 +334,20 @@ export async function createLiveMessage(title, intro = "Starting...") {
     state.flushTimer = null;
     state.flushRequested = false;
     const text = render();
+    const html = markdownToTelegramHtml(text);
+    const formatted = html.length <= 4096 ? html : null;
     if (!state.messageId) {
-      const sent = await sendMessage(text);
+      let sent = formatted
+        ? await postTelegram("sendMessage", { text: formatted, parse_mode: "HTML" })
+        : null;
+      if (!sent) sent = await sendMessage(text);
       state.messageId = sent?.result?.message_id ?? null;
       return;
     }
-    await editMessage(text, state.messageId);
+    let edited = formatted
+      ? await postTelegram("editMessageText", { message_id: state.messageId, text: formatted, parse_mode: "HTML" })
+      : null;
+    if (!edited) await editMessage(text, state.messageId);
   }
 
   function scheduleFlush(delay = 300) {
