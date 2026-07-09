@@ -91,7 +91,7 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
 | `tools/definitions.js` | 1124 | OpenAI-format tool schemas. **Source of truth for what the LLM sees.** All 40+ tool names listed. |
 | `tools/executor.js` | 844 | `executeTool(name, args)`. Pre-flight safety checks for `PROTECTED_TOOLS = {deploy, claim, close, swap, self_update}`. Validates pool thresholds via fresh pool discovery call before deploy. Post-tool side-effects: telegram notifications, pool-memory auto-annotation on `low yield` close, auto-swap base→SOL on close. |
 | `tools/dlmm.js` | huge | Meteora DLMM SDK wrapper. **Lazy-loads** `@meteora-ag/dlmm` to avoid CJS-import-time crash in DRY_RUN/test. Pool cache (5 min), metadata cache (15 min), positions cache (5 min TTL + inflight dedup). `deployPosition`, `getMyPositions`, `getPositionPnl`, `getActiveBin`, `closePosition`, `claimFees`, `searchPools`, `getWalletPositions`, `addLiquidity`, `withdrawLiquidity`. Also has relay-mode (zap-in via LPAgent) and wide-range path (multi-tx `createExtendedEmptyPosition` + `addLiquidityByStrategyChunkable` for >69 bin ranges). Asserts Meteora bin-array initialization rent never charged. |
-| `tools/screening.js` | 862 | `discoverPools`, `getTopCandidates` (hard filter + enrich + score), `getPoolDetail`. Scoring = `fee_tvl*1000 + organic*10 + vol/100 + holders/100`. Has Discord signal merge/only modes, PVP-rival detection. |
+| `tools/screening.js` | 950+ | `discoverPools`, `getTopCandidates` (hard filter + enrich + score), `getPoolDetail`. Scoring = `fee_tvl*500 + organic*10 + vol/100 + holders/100`. Has Discord signal merge/only modes, GMGN trending merge (`useGmgnTrending` — token-first: GMGN `/v1/market/rank` mints resolved to their top-TVL DLMM pool via `dlmm.datapi.meteora.ag`, then re-fetched from pool discovery so downstream filters apply unchanged), PVP-rival detection. |
 | `tools/wallet.js` | 251 | `getWalletBalances` (Helius), `swapToken` (Jupiter Swap V2). `normalizeMint` collapses "SOL"/"native"/any So1-prefixed token to wrapped-SOL. Built-in referral: 50 bps to a fixed address (configurable). |
 | `tools/token.js` | 209 | `getTokenInfo` (Jupiter datapi), `getTokenHolders` (top 100 + filter pool-tagged), `getTokenNarrative` (Jupiter ChainInsight). Cross-references smart wallets from `smart-wallets.json`. |
 | `tools/study.js` | 152 | `studyTopLPers` → Agent Meridian `/top-lp` + `/study-top-lp`. Returns ranked LPer patterns (avg hold, win rate, preferred strategy). |
@@ -190,8 +190,16 @@ The management cycle is **mostly deterministic in JS, LLM only for the hard case
    - `TRAILING_TP` if `trailing_active && (peak - current) >= trailingDropPct` (queued for 15s recheck)
    - `OUT_OF_RANGE` if `minutes_out_of_range >= outOfRangeWaitMinutes`
    - `LOW_YIELD` if `fee_per_tvl_24h < minFeePerTvl24h && age >= minAgeBeforeYieldCheck`
-4. For positions with no exit alert: `getDeterministicCloseRule(p, mgmtConfig)` applies the **5 hard rules** (`index.js:895`):
-   - Rule 1: stop loss, Rule 2: take profit, Rule 3: pumped far above range, Rule 4: OOR wait, Rule 5: low yield.
+4. For positions with no exit alert: `getDeterministicCloseRule(p, mgmtConfig)` applies the **6 hard rules** (`index.js:908`):
+   - Rule 1: stop loss, Rule 2: take profit, Rule 3: pumped far above range, Rule 4: OOR wait, Rule 5: low yield, Rule 6: max hold.
+   - **Rule 6 (max hold)** closes stale positions that bleed while staying in-range, which
+     rules 3–5 can't catch (they need price to leave the range) and rule 1 only catches
+     after a big loss. Two triggers: `maxHoldMinutes` (default 240) — hard close at that
+     age regardless of PnL, fires even when PnL is unpriced/suspect since it's time-based;
+     `maxHoldMinutesIfNegative` (default 120) — close if age ≥ threshold AND `pnl_pct < 0`,
+     gated on a trusted PnL read (skipped when `pnlSuspect`). Either set to `0` disables
+     that trigger. Added after two in-range bleeders (held 550m/850m, range efficiency
+     98–99%) slipped past every other rule and hit −16% / −20%.
 5. Positions needing `CLAIM` if `unclaimed_fees_usd >= minClaimAmount`.
 6. Positions with `instruction` set are marked `INSTRUCTION` and deferred to the LLM.
 7. **LLM is invoked only if any actionMap value is not `STAY`**, with a hard-coded goal that already lists positions + their assigned action. The LLM just executes (no re-evaluation). This saves tokens and prevents hallucinated rules.
@@ -233,7 +241,7 @@ deployPosition()                   tools/dlmm.js
 manage cycle (every N min)
    ├─ recordPositionSnapshot per pool
    ├─ updatePnlAndCheckExits → STOP_LOSS / TRAILING_TP / OOR / LOW_YIELD
-   ├─ getDeterministicCloseRule → 5 hard rules
+   ├─ getDeterministicCloseRule → 6 hard rules (incl. rule 6: max hold)
    ├─ LLM invoked only for non-STAY actions (or INSTRUCTION)
    └─ on close: recordClose() → recordPerformance() in lessons.js
                  ├─ recordPoolDeploy (pool-memory.json)
@@ -291,8 +299,9 @@ All persistent files are loaded/saved on each call — no in-memory caching laye
 | Section | Keys | Default |
 |---|---|---|
 | `risk` | `maxPositions`, `maxDeployAmount` | 3, 50 |
-| `screening` | `excludeHighSupplyConcentration`, `minFeeActiveTvlRatio`, `minTvl`, `maxTvl`, `minVolume`, `minOrganic`, `minQuoteOrganic`, `minHolders`, `minMcap`, `maxMcap`, `minBinStep`, `maxBinStep`, `timeframe`, `category`, `minTokenFeesSol`, `useDiscordSignals`, `discordSignalMode`, `avoidPvpSymbols`, `blockPvpSymbols`, `maxBotHoldersPct`, `maxTop10Pct`, `allowedLaunchpads`, `blockedLaunchpads`, `minTokenAgeHours`, `maxTokenAgeHours` | see `user-config.example.json` |
-| `management` | `minClaimAmount`, `autoSwapAfterClaim`, `outOfRangeBinsToClose`, `outOfRangeWaitMinutes`, `oorCooldownTriggerCount`, `oorCooldownHours`, `repeatDeployCooldownEnabled`, `repeatDeployCooldownTriggerCount`, `repeatDeployCooldownHours`, `repeatDeployCooldownScope`, `repeatDeployCooldownMinFeeEarnedPct`, `minVolumeToRebalance`, `stopLossPct`, `takeProfitPct`, `minFeePerTvl24h`, `minAgeBeforeYieldCheck`, `minSolToOpen`, `deployAmountSol`, `gasReserve`, `positionSizePct`, `trailingTakeProfit`, `trailingTriggerPct`, `trailingDropPct`, `pnlSanityMaxDiffPct`, `solMode` | 5, false, 10, 30, 3, 12, true, 3, 12, "token", 0, 1000, -50, 5, 7, 60, 0.55, 0.5, 0.2, 0.35, true, 3, 1.5, 5, false |
+| `screening` | `excludeHighSupplyConcentration`, `minFeeActiveTvlRatio`, `minTvl`, `maxTvl`, `minVolume`, `minOrganic`, `minQuoteOrganic`, `minHolders`, `minMcap`, `maxMcap`, `minBinStep`, `maxBinStep`, `timeframe`, `category`, `minTokenFeesSol`, `useDiscordSignals`, `discordSignalMode`, `useGmgnTrending`, `gmgnTrendingLimit`, `avoidPvpSymbols`, `blockPvpSymbols`, `maxBotHoldersPct`, `maxTop10Pct`, `allowedLaunchpads`, `blockedLaunchpads`, `minTokenAgeHours`, `maxTokenAgeHours` | see `user-config.example.json` |
+| `gmgn` | `apiKey`, `baseUrl`, `requestDelayMs`, `maxRetries`, `feeSource` (gmgn\|jupiter), `trendingInterval` (1m/5m/1h/6h/24h), `trendingOrderBy` (swaps/volume/…) — fee source for `minTokenFeesSol` + trending screening source | gmgn, 1h, swaps |
+| `management` | `minClaimAmount`, `autoSwapAfterClaim`, `outOfRangeBinsToClose`, `outOfRangeWaitMinutes`, `oorCooldownTriggerCount`, `oorCooldownHours`, `repeatDeployCooldownEnabled`, `repeatDeployCooldownTriggerCount`, `repeatDeployCooldownHours`, `repeatDeployCooldownScope`, `repeatDeployCooldownMinFeeEarnedPct`, `minVolumeToRebalance`, `stopLossPct`, `takeProfitPct`, `minFeePerTvl24h`, `minAgeBeforeYieldCheck`, `minSolToOpen`, `deployAmountSol`, `gasReserve`, `positionSizePct`, `trailingTakeProfit`, `trailingTriggerPct`, `trailingDropPct`, `pnlSanityMaxDiffPct`, `solMode`, `maxHoldMinutes`, `maxHoldMinutesIfNegative` | 5, false, 10, 30, 3, 12, true, 3, 12, "token", 0, 1000, -50, 5, 7, 60, 0.55, 0.5, 0.2, 0.35, true, 3, 1.5, 5, false, 240, 120 |
 | `strategy` | `strategy`, `minBinsBelow`, `maxBinsBelow`, `defaultBinsBelow` | bid_ask, 35, 69, 69 |
 | `schedule` | `managementIntervalMin`, `screeningIntervalMin`, `healthCheckIntervalMin` | 10, 30, 60 |
 | `llm` | `temperature`, `maxTokens`, `maxSteps`, `managementModel`, `screeningModel`, `generalModel` | 0.373, 4096, 20, healer-alpha, hunter-alpha, healer-alpha |

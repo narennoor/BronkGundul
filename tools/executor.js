@@ -209,6 +209,7 @@ function normalizeConfigValue(key, value) {
   const booleanKeys = new Set([
     "excludeHighSupplyConcentration",
     "useDiscordSignals",
+    "useGmgnTrending",
     "avoidPvpSymbols",
     "blockPvpSymbols",
     "autoSwapAfterClaim",
@@ -236,6 +237,8 @@ function normalizeConfigValue(key, value) {
     "pnlRpcUrl",
     "gmgnFeeSource",
     "gmgnApiKey",
+    "gmgnTrendingInterval",
+    "gmgnTrendingOrderBy",
   ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
@@ -367,6 +370,8 @@ const toolMap = {
       minTokenFeesSol: ["screening", "minTokenFeesSol"],
       useDiscordSignals: ["screening", "useDiscordSignals"],
       discordSignalMode: ["screening", "discordSignalMode"],
+      useGmgnTrending: ["screening", "useGmgnTrending"],
+      gmgnTrendingLimit: ["screening", "gmgnTrendingLimit"],
       avoidPvpSymbols: ["screening", "avoidPvpSymbols"],
       blockPvpSymbols: ["screening", "blockPvpSymbols"],
       maxBotHoldersPct: ["screening", "maxBotHoldersPct"],
@@ -453,9 +458,12 @@ const toolMap = {
       pnlRpcUrl: ["pnl", "rpcUrl", ["pnlRpcUrl"]],
       pnlPollIntervalSec: ["pnl", "pollIntervalSec", ["pnlPollIntervalSec"]],
       pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec", ["pnlDepositCacheTtlSec"]],
-      // gmgn fee source
+      // gmgn fee source + trending source
       gmgnFeeSource: ["gmgn", "feeSource", ["gmgnFeeSource"]],
       gmgnApiKey: ["gmgn", "apiKey", ["gmgnApiKey"]],
+      gmgnTrendingInterval: ["gmgn", "trendingInterval", ["gmgnTrendingInterval"]],
+      gmgnTrendingOrderBy: ["gmgn", "trendingOrderBy", ["gmgnTrendingOrderBy"]],
+      gmgnTrendingCacheTtlSec: ["gmgn", "trendingCacheTtlSec", ["gmgnTrendingCacheTtlSec"]],
       // chart indicators
       chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
       indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],

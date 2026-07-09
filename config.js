@@ -89,6 +89,8 @@ export const config = {
     minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam
     useDiscordSignals: u.useDiscordSignals ?? false,
     discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
+    useGmgnTrending:   u.useGmgnTrending   ?? false, // merge GMGN trending tokens (resolved to DLMM pools) into discovery; needs GMGN API key
+    gmgnTrendingLimit: u.gmgnTrendingLimit ?? 10,    // how many GMGN trending tokens to pull per cycle
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
     blockPvpSymbols:   u.blockPvpSymbols   ?? false, // hard-filter PVP rivals before the LLM sees them
     maxBotHoldersPct:  u.maxBotHoldersPct  ?? 30,  // max bot holder addresses % (Jupiter audit)
@@ -241,6 +243,11 @@ export const config = {
     maxRetries: Number(gmgnUserConfig.maxRetries ?? u.gmgnMaxRetries ?? 2),
     // gmgn = use GMGN total_fee for global_fees_sol; jupiter = legacy Jupiter fees
     feeSource: nonEmptyString(gmgnUserConfig.feeSource, u.gmgnFeeSource, "gmgn"),
+    // Trending rank source (screening.useGmgnTrending): /v1/market/rank window + sort
+    trendingInterval: nonEmptyString(gmgnUserConfig.trendingInterval, u.gmgnTrendingInterval, "1h"), // 1m | 5m | 1h | 6h | 24h
+    trendingOrderBy: nonEmptyString(gmgnUserConfig.trendingOrderBy, u.gmgnTrendingOrderBy, "swaps"), // swaps | volume | marketcap | liquidity | holder_count | smart_degen_count
+    // Trending result cache TTL (s) — shields GMGN quota from the 45s opportunity poller
+    trendingCacheTtlSec: Number(gmgnUserConfig.trendingCacheTtlSec ?? u.gmgnTrendingCacheTtlSec ?? 300),
   },
 
   jupiter: {
@@ -307,6 +314,8 @@ export function reloadScreeningThresholds() {
     if (fresh.maxTop10Pct      != null) s.maxTop10Pct      = fresh.maxTop10Pct;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
+    if (fresh.useGmgnTrending !== undefined) s.useGmgnTrending = fresh.useGmgnTrending;
+    if (fresh.gmgnTrendingLimit != null) s.gmgnTrendingLimit = fresh.gmgnTrendingLimit;
     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
     if (fresh.minOrganic     != null) s.minOrganic     = fresh.minOrganic;
     if (fresh.minQuoteOrganic != null) s.minQuoteOrganic = fresh.minQuoteOrganic;

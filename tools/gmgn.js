@@ -93,6 +93,75 @@ function num(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// ─── Trending token rank (screening source) ──────────────
+// GET /v1/market/rank — GMGN's Solana trending list (docs: github.com/GMGNAI/gmgn-skills).
+// Returns lightweight token descriptors ({ mint, rank, ... }) or [] on missing
+// key / error so screening degrades to Meteora-only discovery.
+const TRENDING_INTERVALS = new Set(["1m", "5m", "1h", "6h", "24h"]);
+
+// Cache + inflight dedup (same pattern as getMyPositions in dlmm.js). The
+// opportunity poller reuses the getTopCandidates pipeline every ~45s, so an
+// uncached fetch here would burn ~1900 GMGN requests/day for data that only
+// meaningfully changes on the trendingInterval window. Errors are cached too
+// (empty list) so a failing endpoint isn't hammered on every poll.
+let _trendingCache = { at: 0, limit: 0, tokens: [] };
+let _trendingInflight = null;
+
+export async function getGmgnTrendingTokens({ limit = 10 } = {}) {
+  if (!hasGmgnApiKey()) return [];
+  const ttlMs = Math.max(0, Number(config.gmgn?.trendingCacheTtlSec ?? 300)) * 1000;
+  if (ttlMs > 0 && Date.now() - _trendingCache.at < ttlMs && _trendingCache.limit >= limit) {
+    return _trendingCache.tokens.slice(0, limit);
+  }
+  if (_trendingInflight) {
+    return _trendingInflight.then((tokens) => tokens.slice(0, limit));
+  }
+  _trendingInflight = fetchGmgnTrendingTokens(limit)
+    .then((tokens) => {
+      _trendingCache = { at: Date.now(), limit, tokens };
+      return tokens;
+    })
+    .finally(() => { _trendingInflight = null; });
+  return _trendingInflight;
+}
+
+async function fetchGmgnTrendingTokens(limit) {
+  const configured = String(config.gmgn?.trendingInterval || "1h");
+  const interval = TRENDING_INTERVALS.has(configured) ? configured : "1h";
+  try {
+    const payload = await gmgnFetch("/v1/market/rank", {
+      params: {
+        chain: "sol",
+        interval,
+        limit: Math.min(100, Math.max(1, Math.round(Number(limit) || 10))),
+        order_by: config.gmgn?.trendingOrderBy || "swaps",
+        direction: "desc",
+        filter: ["renounced", "frozen"],
+      },
+    });
+    // Response is double-wrapped like /v1/token/info: { code, data: { code, data: { rank: [...] } } }
+    const inner = payload?.data?.data ?? payload?.data ?? {};
+    const items = Array.isArray(inner) ? inner : Array.isArray(inner?.rank) ? inner.rank : [];
+    const tokens = items
+      .map((item, index) => ({
+        mint: item?.address || item?.token_address || item?.mint || null,
+        symbol: item?.symbol || null,
+        rank: num(item?.rank) ?? index + 1,
+        smart_degen_count: num(item?.smart_degen_count),
+        hot_level: num(item?.hot_level),
+        launchpad: item?.launchpad_platform || null,
+      }))
+      .filter((token) => token.mint);
+    if (items.length > 0 && tokens.length === 0) {
+      log("gmgn", `trending rank returned ${items.length} item(s) but no parsable mint — response shape may have changed`);
+    }
+    return tokens;
+  } catch (error) {
+    log("gmgn", `trending rank fetch failed: ${error.message}`);
+    return [];
+  }
+}
+
 // ─── Token fees (SOL) for the minTokenFeesSol gate ──────────────
 // Returns { total_fee, trade_fee } in SOL, or null on missing key / error
 // so callers can fall back to Jupiter's fee figure.

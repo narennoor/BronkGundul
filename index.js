@@ -542,10 +542,16 @@ export async function runScreeningCycle({ silent = false } = {}) {
         ? `  pvp: HIGH — rival ${pool.pvp_rival_name || pool.pvp_symbol} (${pool.pvp_rival_mint?.slice(0, 8)}...) has pool ${pool.pvp_rival_pool?.slice(0, 8)}..., tvl=$${pool.pvp_rival_tvl}, holders=${pool.pvp_rival_holders}, fees=${pool.pvp_rival_fees}SOL`
         : null;
 
+      const signalBits = [
+        pool.discord_signal ? `discord_signal×${pool.discord_signal_count || 1}` : null,
+        pool.gmgn_trending ? `gmgn_trending#${pool.gmgn_trending_rank ?? "?"}${pool.gmgn_smart_degen_count != null ? ` smart_degens=${pool.gmgn_smart_degen_count}` : ""}` : null,
+      ].filter(Boolean);
+
       const block = [
         `POOL: ${pool.name} (${pool.pool})`,
         `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
         `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
+        signalBits.length ? `  signals: ${signalBits.join(", ")}` : null,
         pvpLine,
         `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
         activeBin != null ? `  active_bin: ${activeBin}` : null,
@@ -1057,6 +1063,7 @@ function settingValue(key) {
     chartIndicatorsEnabled: config.indicators.enabled,
     trailingTakeProfit: config.management.trailingTakeProfit,
     useDiscordSignals: config.screening.useDiscordSignals,
+    useGmgnTrending: config.screening.useGmgnTrending,
     blockPvpSymbols: config.screening.blockPvpSymbols,
     strategy: config.strategy.strategy,
     minBinsBelow: config.strategy.minBinsBelow,
@@ -1156,6 +1163,7 @@ function renderSettingsMenu(page = "main") {
   } else if (page === "screen") {
     rows = [
       [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
+      [toggleButton("useGmgnTrending", "GMGN trending")],
       [
         settingButton(`Strategy: spot`, "cfg:set:strategy:spot"),
         settingButton(`Strategy: bid_ask`, "cfg:set:strategy:bid_ask"),
@@ -1284,7 +1292,7 @@ async function applySettingsMenuCallback(msg) {
   }
   page = key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
     ? "indicators"
-    : ["useDiscordSignals", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
+    : ["useDiscordSignals", "useGmgnTrending", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
       ? "screen"
       : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);

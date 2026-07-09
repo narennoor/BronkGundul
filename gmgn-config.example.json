@@ -1,8 +1,11 @@
 {
-  "_note": "Optional. GMGN OpenAPI is used as the fee source for the minTokenFeesSol gate (more accurate than Jupiter's `fees`). Copy to gmgn-config.json and fill apiKey, or set GMGN_API_KEY in .env / gmgnApiKey in user-config.json. Set feeSource to \"jupiter\" to disable.",
+  "_note": "Optional. GMGN OpenAPI is used as the fee source for the minTokenFeesSol gate (more accurate than Jupiter's `fees`) and, when screening.useGmgnTrending is on, as a trending-token screening source (/v1/market/rank). Copy to gmgn-config.json and fill apiKey, or set GMGN_API_KEY in .env / gmgnApiKey in user-config.json. Set feeSource to \"jupiter\" to disable the fee source.",
   "apiKey": "",
   "baseUrl": "https://openapi.gmgn.ai",
   "requestDelayMs": 2500,
   "maxRetries": 2,
-  "feeSource": "gmgn"
+  "feeSource": "gmgn",
+  "trendingInterval": "1h",
+  "trendingOrderBy": "swaps",
+  "trendingCacheTtlSec": 300
 }

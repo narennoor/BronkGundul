@@ -5,6 +5,7 @@ import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
+import { getGmgnTrendingTokens, hasGmgnApiKey } from "./gmgn.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -178,7 +179,7 @@ function getRawPoolScreeningRejectReason(pool, s) {
     return `quote organic ${quoteOrganic ?? "unknown"} below minQuoteOrganic ${s.minQuoteOrganic}`;
   }
   if (
-    pool?.discord_signal &&
+    (pool?.discord_signal || pool?.gmgn_trending) &&
     Array.isArray(s.allowedLaunchpads) &&
     s.allowedLaunchpads.length > 0 &&
     launchpad &&
@@ -344,13 +345,17 @@ async function enrichDiscordSignalLaunchpads(rawPools) {
   }
 }
 
-async function findRivalPool(mint) {
-  const url = `https://dlmm.datapi.meteora.ag/pools?query=${encodeURIComponent(mint)}&sort_by=${encodeURIComponent("tvl:desc")}&filter_by=${encodeURIComponent(`tvl>${PVP_MIN_ACTIVE_TVL}`)}`;
+async function findTopDlmmPoolByMint(mint, minTvl) {
+  const url = `https://dlmm.datapi.meteora.ag/pools?query=${encodeURIComponent(mint)}&sort_by=${encodeURIComponent("tvl:desc")}&filter_by=${encodeURIComponent(`tvl>${minTvl}`)}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`rival pool search ${res.status}`);
+  if (!res.ok) throw new Error(`dlmm pool search ${res.status}`);
   const data = await res.json();
   const pools = Array.isArray(data?.data) ? data.data : [];
   return pools.find((pool) => pool?.token_x?.address === mint || pool?.token_y?.address === mint) || null;
+}
+
+async function findRivalPool(mint) {
+  return findTopDlmmPoolByMint(mint, PVP_MIN_ACTIVE_TVL);
 }
 
 async function enrichPvpRisk(pools) {
@@ -427,6 +432,68 @@ async function refreshDiscordOnlyPools(pools, timeframe) {
     }
     log("screening", `Discord signal refreshed live data: ${pool.name || pool.pool_address} — vol=${pool.volume?.toFixed(0)} fee=${pool.fee?.toFixed(2)}`);
   }
+}
+
+/**
+ * Merge GMGN trending tokens into the discovery pool set (token-first source).
+ * Each trending mint is resolved to its highest-TVL DLMM pool, then re-fetched
+ * from the pool discovery API so the object shape matches native discovery
+ * pools — every downstream filter/enrichment applies unchanged. Mints whose
+ * pool is already in the discovery set just get tagged (confirmation signal).
+ */
+async function mergeGmgnTrendingPools(rawPools, s) {
+  const trendingTokens = await getGmgnTrendingTokens({ limit: s.gmgnTrendingLimit });
+  if (trendingTokens.length === 0) return rawPools;
+
+  const tagPool = (pool, token) => {
+    pool.gmgn_trending = true;
+    pool.gmgn_trending_rank = token.rank;
+    pool.gmgn_smart_degen_count = token.smart_degen_count;
+    pool.gmgn_hot_level = token.hot_level;
+    if (token.launchpad && !getPoolLaunchpad(pool)) pool.base_token_launchpad = token.launchpad;
+  };
+
+  const byMint = new Map();
+  for (const pool of rawPools) {
+    const mint = getPoolBaseMint(pool);
+    if (mint && !byMint.has(mint)) byMint.set(mint, pool);
+  }
+
+  const unresolved = [];
+  let tagged = 0;
+  for (const token of trendingTokens) {
+    const existing = byMint.get(token.mint);
+    if (existing) {
+      tagPool(existing, token);
+      tagged++;
+    } else if (!isBlacklisted(token.mint)) {
+      unresolved.push(token);
+    }
+  }
+
+  const minTvl = Math.max(1, Number(s.minTvl) || 1);
+  const resolved = await Promise.allSettled(
+    unresolved.map(async (token) => {
+      const match = await findTopDlmmPoolByMint(token.mint, minTvl);
+      const poolAddress = match?.address || match?.pool_address;
+      if (!poolAddress) return null;
+      const pool = await fetchPoolDiscoveryDetail({ poolAddress, timeframe: s.timeframe });
+      if (!pool) return null;
+      tagPool(pool, token);
+      return pool;
+    })
+  );
+
+  const byPool = new Map(rawPools.map((pool) => [pool.pool_address, pool]));
+  let added = 0;
+  for (const result of resolved) {
+    const pool = result.status === "fulfilled" ? result.value : null;
+    if (!pool?.pool_address || byPool.has(pool.pool_address)) continue;
+    byPool.set(pool.pool_address, pool);
+    added++;
+  }
+  log("screening", `GMGN trending: ${trendingTokens.length} token(s) → ${added} new pool(s) merged, ${tagged} existing tagged`);
+  return Array.from(byPool.values());
 }
 
 /**
@@ -519,6 +586,13 @@ export async function discoverPools({
         await refreshDiscordOnlyPools(discordOnlyPools, s.timeframe);
       }
     }
+  }
+
+  if (s.useGmgnTrending && hasGmgnApiKey()) {
+    rawPools = await mergeGmgnTrendingPools(rawPools, s).catch((error) => {
+      log("screening", `GMGN trending merge failed: ${error.message}`);
+      return rawPools;
+    });
   }
 
   rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
@@ -799,6 +873,9 @@ function condensePool(p) {
     discord_signal_count: p.discord_signal_count || 0,
     discord_signal_seen_count: p.discord_signal_seen_count || 0,
     discord_signal_last_seen_at: p.discord_signal_last_seen_at || null,
+    gmgn_trending: Boolean(p.gmgn_trending),
+    gmgn_trending_rank: p.gmgn_trending_rank ?? null,
+    gmgn_smart_degen_count: p.gmgn_smart_degen_count ?? null,
 
     // Price action
     price: p.pool_price,

@@ -35,6 +35,8 @@
   "minTokenFeesSol": 30,
   "useDiscordSignals": false,
   "discordSignalMode": "merge",
+  "useGmgnTrending": false,
+  "gmgnTrendingLimit": 10,
   "avoidPvpSymbols": true,
   "blockPvpSymbols": false,
   "maxBotHoldersPct": 30,
@@ -93,6 +95,9 @@
 
   "gmgnFeeSource": "gmgn",
   "gmgnApiKey": "",
+  "gmgnTrendingInterval": "1h",
+  "gmgnTrendingOrderBy": "swaps",
+  "gmgnTrendingCacheTtlSec": 300,
 
   "chartIndicators": {
     "enabled": false,
