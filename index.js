@@ -573,6 +573,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
           smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
           narrative_quality:     n?.narrative ? "present" : "absent",
           volatility:            pool.volatility            ?? null,
+          // Attribution only — not in signal-weights SIGNAL_NAMES, so Darwin ignores these
+          gmgn_trending:         Boolean(pool.gmgn_trending),
+          gmgn_trending_rank:    pool.gmgn_trending_rank    ?? null,
+          gmgn_smart_degen_count: pool.gmgn_smart_degen_count ?? null,
+          discord_signal:        Boolean(pool.discord_signal),
+          discord_signal_count:  pool.discord_signal_count  ?? null,
         });
       }
 
