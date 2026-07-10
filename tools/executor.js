@@ -223,6 +223,7 @@ function normalizeConfigValue(key, value) {
     "useDiscordSignals",
     "useGmgnTrending",
     "useJupTrending",
+    "useDexScreener",
     "avoidPvpSymbols",
     "blockPvpSymbols",
     "autoSwapAfterClaim",
@@ -232,7 +233,7 @@ function normalizeConfigValue(key, value) {
     "darwinEnabled",
     "lpAgentRelayEnabled",
   ]);
-  const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads", "jupTrendingCategories", "sweepExcludeMints"]);
+  const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads", "jupTrendingCategories", "dexScreenerCategories", "sweepExcludeMints"]);
   const stringKeys = new Set([
     "timeframe",
     "category",
@@ -393,6 +394,10 @@ const toolMap = {
       jupTrendingInterval: ["screening", "jupTrendingInterval"],
       jupTrendingCategories: ["screening", "jupTrendingCategories"],
       jupTrendingCacheTtlSec: ["screening", "jupTrendingCacheTtlSec"],
+      useDexScreener: ["screening", "useDexScreener"],
+      dexScreenerLimit: ["screening", "dexScreenerLimit"],
+      dexScreenerCategories: ["screening", "dexScreenerCategories"],
+      dexScreenerCacheTtlSec: ["screening", "dexScreenerCacheTtlSec"],
       avoidPvpSymbols: ["screening", "avoidPvpSymbols"],
       blockPvpSymbols: ["screening", "blockPvpSymbols"],
       maxBotHoldersPct: ["screening", "maxBotHoldersPct"],

@@ -578,6 +578,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         pool.discord_signal ? `discord_signal×${pool.discord_signal_count || 1}` : null,
         pool.gmgn_trending ? `gmgn_trending#${pool.gmgn_trending_rank ?? "?"}${pool.gmgn_smart_degen_count != null ? ` smart_degens=${pool.gmgn_smart_degen_count}` : ""}` : null,
         pool.jup_trending ? `jup_trending#${pool.jup_trending_rank ?? "?"}${pool.jup_trending_category ? ` (${pool.jup_trending_category})` : ""}` : null,
+        pool.dexscreener_boost ? `dexscreener_boost#${pool.dexscreener_rank ?? "?"}${pool.dexscreener_boost_total != null ? ` total=${pool.dexscreener_boost_total}` : ""}` : null,
       ].filter(Boolean);
 
       const block = [
@@ -613,6 +614,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
           jup_trending:          Boolean(pool.jup_trending),
           jup_trending_rank:     pool.jup_trending_rank     ?? null,
           jup_trending_category: pool.jup_trending_category ?? null,
+          dexscreener_boost:     Boolean(pool.dexscreener_boost),
+          dexscreener_rank:      pool.dexscreener_rank      ?? null,
+          dexscreener_boost_total: pool.dexscreener_boost_total ?? null,
           discord_signal:        Boolean(pool.discord_signal),
           discord_signal_count:  pool.discord_signal_count  ?? null,
         });
@@ -1107,6 +1111,7 @@ function settingValue(key) {
     useDiscordSignals: config.screening.useDiscordSignals,
     useGmgnTrending: config.screening.useGmgnTrending,
     useJupTrending: config.screening.useJupTrending,
+    useDexScreener: config.screening.useDexScreener,
     blockPvpSymbols: config.screening.blockPvpSymbols,
     strategy: config.strategy.strategy,
     minBinsBelow: config.strategy.minBinsBelow,
@@ -1207,6 +1212,7 @@ function renderSettingsMenu(page = "main") {
     rows = [
       [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
       [toggleButton("useGmgnTrending", "GMGN trending"), toggleButton("useJupTrending", "Jup trending")],
+      [toggleButton("useDexScreener", "DexScreener boosts")],
       [
         settingButton(`Strategy: spot`, "cfg:set:strategy:spot"),
         settingButton(`Strategy: bid_ask`, "cfg:set:strategy:bid_ask"),
@@ -1335,7 +1341,7 @@ async function applySettingsMenuCallback(msg) {
   }
   page = key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
     ? "indicators"
-    : ["useDiscordSignals", "useGmgnTrending", "useJupTrending", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
+    : ["useDiscordSignals", "useGmgnTrending", "useJupTrending", "useDexScreener", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
       ? "screen"
       : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);

@@ -97,6 +97,10 @@ export const config = {
     jupTrendingInterval: u.jupTrendingInterval ?? "1h", // 5m | 1h | 6h | 24h
     jupTrendingCategories: u.jupTrendingCategories ?? ["toptrending", "toptraded"], // datapi.jup.ag/v1/pools/{category}/{interval}
     jupTrendingCacheTtlSec: u.jupTrendingCacheTtlSec ?? 300, // cache TTL (s) — shields datapi from the 45s opportunity poller
+    useDexScreener:    u.useDexScreener    ?? false, // merge DexScreener boosted tokens (resolved to DLMM pools) into discovery; no API key needed
+    dexScreenerLimit:  u.dexScreenerLimit  ?? 10,    // how many boosted tokens to pull per category per cycle
+    dexScreenerCategories: u.dexScreenerCategories ?? ["top", "latest"], // token-boosts/{category}/v1 (top = largest active boosts, latest = newest)
+    dexScreenerCacheTtlSec: u.dexScreenerCacheTtlSec ?? 300, // cache TTL (s) — boosts endpoints are limited to 60 req/min
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
     blockPvpSymbols:   u.blockPvpSymbols   ?? false, // hard-filter PVP rivals before the LLM sees them
     maxBotHoldersPct:  u.maxBotHoldersPct  ?? 30,  // max bot holder addresses % (Jupiter audit)
@@ -337,6 +341,10 @@ export function reloadScreeningThresholds() {
     if (fresh.jupTrendingInterval != null) s.jupTrendingInterval = fresh.jupTrendingInterval;
     if (fresh.jupTrendingCategories !== undefined) s.jupTrendingCategories = fresh.jupTrendingCategories;
     if (fresh.jupTrendingCacheTtlSec != null) s.jupTrendingCacheTtlSec = fresh.jupTrendingCacheTtlSec;
+    if (fresh.useDexScreener !== undefined) s.useDexScreener = fresh.useDexScreener;
+    if (fresh.dexScreenerLimit != null) s.dexScreenerLimit = fresh.dexScreenerLimit;
+    if (fresh.dexScreenerCategories !== undefined) s.dexScreenerCategories = fresh.dexScreenerCategories;
+    if (fresh.dexScreenerCacheTtlSec != null) s.dexScreenerCacheTtlSec = fresh.dexScreenerCacheTtlSec;
     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
     if (fresh.minOrganic     != null) s.minOrganic     = fresh.minOrganic;
     if (fresh.minQuoteOrganic != null) s.minQuoteOrganic = fresh.minQuoteOrganic;

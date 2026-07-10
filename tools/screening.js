@@ -7,6 +7,7 @@ import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { getGmgnTrendingTokens, hasGmgnApiKey } from "./gmgn.js";
 import { getJupTrendingTokens } from "./jupiter-trending.js";
+import { getDexScreenerTokens } from "./dexscreener.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -183,7 +184,7 @@ function getRawPoolScreeningRejectReason(pool, s) {
     return `quote organic ${quoteOrganic ?? "unknown"} below minQuoteOrganic ${s.minQuoteOrganic}`;
   }
   if (
-    (pool?.discord_signal || pool?.gmgn_trending || pool?.jup_trending) &&
+    (pool?.discord_signal || pool?.gmgn_trending || pool?.jup_trending || pool?.dexscreener_boost) &&
     Array.isArray(s.allowedLaunchpads) &&
     s.allowedLaunchpads.length > 0 &&
     launchpad &&
@@ -563,6 +564,68 @@ async function mergeJupTrendingPools(rawPools, s) {
 }
 
 /**
+ * Merge DexScreener boosted tokens into the discovery pool set (token-first
+ * source, same contract as mergeJupTrendingPools). Each boosted mint is
+ * resolved to its highest-TVL DLMM pool, then re-fetched from the pool
+ * discovery API so the object shape matches native discovery pools — every
+ * downstream filter/enrichment applies unchanged. Mints whose pool is already
+ * in the discovery set just get tagged (confirmation signal).
+ */
+async function mergeDexScreenerPools(rawPools, s) {
+  const boostedTokens = await getDexScreenerTokens({ limit: s.dexScreenerLimit });
+  if (boostedTokens.length === 0) return rawPools;
+
+  const tagPool = (pool, token) => {
+    pool.dexscreener_boost = true;
+    pool.dexscreener_rank = token.rank;
+    pool.dexscreener_category = token.category;
+    pool.dexscreener_boost_total = token.boost_total;
+  };
+
+  const byMint = new Map();
+  for (const pool of rawPools) {
+    const mint = getPoolBaseMint(pool);
+    if (mint && !byMint.has(mint)) byMint.set(mint, pool);
+  }
+
+  const unresolved = [];
+  let tagged = 0;
+  for (const token of boostedTokens) {
+    const existing = byMint.get(token.mint);
+    if (existing) {
+      tagPool(existing, token);
+      tagged++;
+    } else if (!isBlacklisted(token.mint)) {
+      unresolved.push(token);
+    }
+  }
+
+  const minTvl = Math.max(1, Number(s.minTvl) || 1);
+  const resolved = await Promise.allSettled(
+    unresolved.map(async (token) => {
+      const match = await findTopDlmmPoolByMint(token.mint, minTvl);
+      const poolAddress = match?.address || match?.pool_address;
+      if (!poolAddress) return null;
+      const pool = await fetchPoolDiscoveryDetail({ poolAddress, timeframe: s.timeframe });
+      if (!pool) return null;
+      tagPool(pool, token);
+      return pool;
+    })
+  );
+
+  const byPool = new Map(rawPools.map((pool) => [pool.pool_address, pool]));
+  let added = 0;
+  for (const result of resolved) {
+    const pool = result.status === "fulfilled" ? result.value : null;
+    if (!pool?.pool_address || byPool.has(pool.pool_address)) continue;
+    byPool.set(pool.pool_address, pool);
+    added++;
+  }
+  log("screening", `DexScreener boosts: ${boostedTokens.length} token(s) → ${added} new pool(s) merged, ${tagged} existing tagged`);
+  return Array.from(byPool.values());
+}
+
+/**
  * Fetch pools from the Meteora Pool Discovery API.
  * Returns condensed data optimized for LLM consumption (saves tokens).
  */
@@ -665,6 +728,13 @@ export async function discoverPools({
   if (s.useJupTrending) {
     rawPools = await mergeJupTrendingPools(rawPools, s).catch((error) => {
       log("screening", `Jup trending merge failed: ${error.message}`);
+      return rawPools;
+    });
+  }
+
+  if (s.useDexScreener) {
+    rawPools = await mergeDexScreenerPools(rawPools, s).catch((error) => {
+      log("screening", `DexScreener boosts merge failed: ${error.message}`);
       return rawPools;
     });
   }
@@ -958,6 +1028,10 @@ function condensePool(p) {
     jup_trending: Boolean(p.jup_trending),
     jup_trending_rank: p.jup_trending_rank ?? null,
     jup_trending_category: p.jup_trending_category ?? null,
+    dexscreener_boost: Boolean(p.dexscreener_boost),
+    dexscreener_rank: p.dexscreener_rank ?? null,
+    dexscreener_category: p.dexscreener_category ?? null,
+    dexscreener_boost_total: p.dexscreener_boost_total ?? null,
 
     // Price action
     price: p.pool_price,
