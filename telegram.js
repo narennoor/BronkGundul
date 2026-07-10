@@ -20,6 +20,33 @@ let _liveMessageDepth = 0;
 let _warnedMissingChatId = false;
 let _warnedMissingAllowedUsers = false;
 
+// ─── Optional Telegram-only proxy ────────────────────────────────
+// Some ISPs block api.telegram.org at the network level (DPI/IP block) while
+// the rest of the internet works. Set TELEGRAM_PROXY_URL in .env (e.g.
+// http://user:pass@host:port) to route ONLY bot traffic through an HTTP(S)
+// CONNECT proxy — RPC and pool API calls stay on the direct path. Uses
+// undici's own fetch with its ProxyAgent (mixing the npm ProxyAgent into the
+// built-in fetch is unreliable across versions). Lazy-init on first call;
+// falls back to a direct connection if the proxy can't be constructed.
+let _tgProxy; // undefined = not initialized, null = disabled/failed, else {fetch, dispatcher}
+
+async function tgFetch(url, init = {}) {
+  const proxyUrl = process.env.TELEGRAM_PROXY_URL;
+  if (!proxyUrl) return fetch(url, init);
+  if (_tgProxy === undefined) {
+    try {
+      const { fetch: undiciFetch, ProxyAgent } = await import("undici");
+      _tgProxy = { fetch: undiciFetch, dispatcher: new ProxyAgent(proxyUrl) };
+      log("telegram", `Telegram traffic routed via proxy ${new URL(proxyUrl).host}`);
+    } catch (e) {
+      _tgProxy = null;
+      log("telegram_warn", `TELEGRAM_PROXY_URL set but proxy init failed (${e.message}); using direct connection`);
+    }
+  }
+  if (!_tgProxy) return fetch(url, init);
+  return _tgProxy.fetch(url, { ...init, dispatcher: _tgProxy.dispatcher });
+}
+
 function nonEmptyChatId(value) {
   if (value == null) return null;
   const trimmed = String(value).trim();
@@ -99,7 +126,7 @@ export function isEnabled() {
 async function postTelegram(method, body) {
   if (!TOKEN || !chatId) return null;
   try {
-    const res = await fetch(`${BASE}/${method}`, {
+    const res = await tgFetch(`${BASE}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, ...body }),
@@ -123,7 +150,7 @@ async function postTelegram(method, body) {
 async function postTelegramRaw(method, body) {
   if (!TOKEN) return null;
   try {
-    const res = await fetch(`${BASE}/${method}`, {
+    const res = await tgFetch(`${BASE}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -415,7 +442,7 @@ export async function createLiveMessage(title, intro = "Starting...") {
 async function poll(onMessage) {
   while (_polling) {
     try {
-      const res = await fetch(
+      const res = await tgFetch(
         `${BASE}/getUpdates?offset=${_offset}&timeout=30`,
         { signal: AbortSignal.timeout(35_000) }
       );
@@ -479,7 +506,7 @@ const BOT_COMMANDS = [
 async function registerCommands() {
   if (!BASE) return;
   try {
-    await fetch(`${BASE}/setMyCommands`, {
+    await tgFetch(`${BASE}/setMyCommands`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ commands: BOT_COMMANDS }),
