@@ -9,7 +9,7 @@ import {
   closePosition,
   searchPools,
 } from "./dlmm.js";
-import { getWalletBalances, swapToken } from "./wallet.js";
+import { getWalletBalances, swapToken, normalizeMint } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
 import { setPositionInstruction } from "../state.js";
@@ -40,7 +40,7 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
-import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
+import { notifyDeploy, notifyClose, notifySwap, sendMessage } from "../telegram.js";
 
 function numberOrNull(value) {
   const n = Number(value);
@@ -124,6 +124,18 @@ async function validateDeployPoolThresholds(args) {
     return {
       pass: false,
       reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
+    };
+  }
+  const maxFeeActiveTvlRatio = numberOrNull(config.screening.maxFeeActiveTvlRatio);
+  if (
+    maxFeeActiveTvlRatio != null &&
+    maxFeeActiveTvlRatio > 0 &&
+    feeActiveTvlRatio != null &&
+    feeActiveTvlRatio > maxFeeActiveTvlRatio
+  ) {
+    return {
+      pass: false,
+      reason: `Pool fee/active-TVL ${feeActiveTvlRatio}% is above configured maxFeeActiveTvlRatio ${maxFeeActiveTvlRatio}% (peak-degen pool, mean-reversion risk).`,
     };
   }
 
@@ -210,15 +222,17 @@ function normalizeConfigValue(key, value) {
     "excludeHighSupplyConcentration",
     "useDiscordSignals",
     "useGmgnTrending",
+    "useJupTrending",
     "avoidPvpSymbols",
     "blockPvpSymbols",
     "autoSwapAfterClaim",
+    "sweepEnabled",
     "trailingTakeProfit",
     "solMode",
     "darwinEnabled",
     "lpAgentRelayEnabled",
   ]);
-  const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
+  const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads", "jupTrendingCategories", "sweepExcludeMints"]);
   const stringKeys = new Set([
     "timeframe",
     "category",
@@ -239,6 +253,7 @@ function normalizeConfigValue(key, value) {
     "gmgnApiKey",
     "gmgnTrendingInterval",
     "gmgnTrendingOrderBy",
+    "jupTrendingInterval",
   ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
@@ -354,6 +369,7 @@ const toolMap = {
     const CONFIG_MAP = {
       // screening
       minFeeActiveTvlRatio: ["screening", "minFeeActiveTvlRatio"],
+      maxFeeActiveTvlRatio: ["screening", "maxFeeActiveTvlRatio"],
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
       minTvl: ["screening", "minTvl"],
       maxTvl: ["screening", "maxTvl"],
@@ -372,6 +388,11 @@ const toolMap = {
       discordSignalMode: ["screening", "discordSignalMode"],
       useGmgnTrending: ["screening", "useGmgnTrending"],
       gmgnTrendingLimit: ["screening", "gmgnTrendingLimit"],
+      useJupTrending: ["screening", "useJupTrending"],
+      jupTrendingLimit: ["screening", "jupTrendingLimit"],
+      jupTrendingInterval: ["screening", "jupTrendingInterval"],
+      jupTrendingCategories: ["screening", "jupTrendingCategories"],
+      jupTrendingCacheTtlSec: ["screening", "jupTrendingCacheTtlSec"],
       avoidPvpSymbols: ["screening", "avoidPvpSymbols"],
       blockPvpSymbols: ["screening", "blockPvpSymbols"],
       maxBotHoldersPct: ["screening", "maxBotHoldersPct"],
@@ -387,6 +408,9 @@ const toolMap = {
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
       autoSwapRetryAttempts: ["management", "autoSwapRetryAttempts"],
       autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
+      sweepEnabled: ["management", "sweepEnabled"],
+      sweepMinUsd: ["management", "sweepMinUsd"],
+      sweepExcludeMints: ["management", "sweepExcludeMints"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
       maxHoldMinutes: ["management", "maxHoldMinutes"],
@@ -431,6 +455,8 @@ const toolMap = {
       managementIntervalMin: ["schedule", "managementIntervalMin"],
       screeningIntervalMin: ["schedule", "screeningIntervalMin"],
       healthCheckIntervalMin: ["schedule", "healthCheckIntervalMin"],
+      screeningStartHourUtc: ["schedule", "screeningStartHourUtc"],
+      screeningEndHourUtc: ["schedule", "screeningEndHourUtc"],
       // models
       managementModel: ["llm", "managementModel"],
       screeningModel: ["llm", "screeningModel"],
@@ -645,6 +671,70 @@ async function swapBaseToSolWithRetry(baseMint, label) {
   }
   log("executor_warn", `Auto-swap ${label} failed after ${attempts} attempts — base token left unsold (${baseMint.slice(0, 8)})`);
   return { swapped: false, result: null, token: null };
+}
+
+// ─── Leftover-token sweep (fallback for the post-close auto-swap) ──────────
+// The auto-swap above retries for ~40s and gives up — a network outage longer
+// than that leaves the base token stranded in the wallet with only a local
+// warning (9 Jul 2026: ~$275 of pendu after the ISP outage). Called every
+// management cycle: any priced token above sweepMinUsd whose mint has no open
+// position is swapped back to SOL. A mint must survive two consecutive scans
+// before it is sold, so tokens passing through the wallet mid-deploy are never
+// touched. Unpriced tokens (usd=null from Helius) are ignored — value unknown,
+// and blind-selling scam airdrops burns gas on dead routes.
+const _sweepSeen = new Set(); // mints seen last scan (in-memory; a restart just re-arms the 2-scan rule)
+let _sweepBusy = false;
+
+export async function sweepLeftoverTokens() {
+  const m = config.management;
+  if (!m.sweepEnabled || _sweepBusy) return { swept: [] };
+  _sweepBusy = true;
+  try {
+    const minUsd = Math.max(0.1, Number(m.sweepMinUsd ?? 1));
+    const exclude = new Set([
+      config.tokens.SOL,
+      config.tokens.USDC,
+      config.tokens.USDT,
+      ...(Array.isArray(m.sweepExcludeMints) ? m.sweepExcludeMints : []),
+    ]);
+    const [balances, myPositions] = await Promise.all([getWalletBalances({}), getMyPositions({})]);
+    if (balances?.error) return { swept: [], error: balances.error }; // failed read — keep _sweepSeen as-is
+    const openMints = new Set((myPositions?.positions || []).map((p) => p.base_mint).filter(Boolean));
+
+    // normalizeMint collapses native-SOL aliases (Helius lists native SOL under a
+    // So1… mint that differs from wrapped SOL) so SOL itself can never be a candidate
+    const candidates = (balances.tokens || []).filter((t) =>
+      t?.mint && !exclude.has(normalizeMint(t.mint)) && !openMints.has(t.mint) && Number(t.usd) >= minUsd
+    );
+
+    const current = new Set(candidates.map((t) => t.mint));
+    for (const mint of _sweepSeen) if (!current.has(mint)) _sweepSeen.delete(mint);
+
+    const swept = [];
+    for (const token of candidates) {
+      if (!_sweepSeen.has(token.mint)) {
+        _sweepSeen.add(token.mint);
+        log("sweep", `Leftover token noted: ${token.symbol} ($${Number(token.usd).toFixed(2)}, no open position) — sweeping next cycle if still present`);
+        continue;
+      }
+      log("sweep", `Sweeping leftover ${token.symbol} ($${Number(token.usd).toFixed(2)}) back to SOL`);
+      const { swapped, result } = await swapBaseToSolWithRetry(token.mint, "sweep");
+      if (swapped) {
+        _sweepSeen.delete(token.mint);
+        swept.push({ mint: token.mint, symbol: token.symbol, usd: Number(token.usd) });
+        if (result) {
+          notifySwap({ inputSymbol: token.symbol, outputSymbol: "SOL", amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
+        }
+      } else {
+        // Stays in _sweepSeen — retried next management cycle. Alert so a stuck
+        // token is no longer log-only (the pendu failure mode).
+        sendMessage(`⚠️ Sweep failed: ${token.symbol} ($${Number(token.usd).toFixed(2)}) is still in the wallet with no open position — will retry next cycle. Check logs.`).catch(() => {});
+      }
+    }
+    return { swept };
+  } finally {
+    _sweepBusy = false;
+  }
 }
 
 /**

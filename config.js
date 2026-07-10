@@ -74,6 +74,7 @@ export const config = {
   screening: {
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
+    maxFeeActiveTvlRatio: u.maxFeeActiveTvlRatio ?? null, // null = no cap; ratio scale (0.3 = 30%). Extreme fee/TVL = peak-degen pool, mean-reversion risk
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
     minVolume:         u.minVolume         ?? 500,
@@ -91,6 +92,11 @@ export const config = {
     discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     useGmgnTrending:   u.useGmgnTrending   ?? false, // merge GMGN trending tokens (resolved to DLMM pools) into discovery; needs GMGN API key
     gmgnTrendingLimit: u.gmgnTrendingLimit ?? 10,    // how many GMGN trending tokens to pull per cycle
+    useJupTrending:    u.useJupTrending    ?? false, // merge Jupiter datapi trending/toptraded tokens (resolved to DLMM pools) into discovery; no API key needed
+    jupTrendingLimit:  u.jupTrendingLimit  ?? 10,    // how many Jupiter trending tokens to pull per category per cycle
+    jupTrendingInterval: u.jupTrendingInterval ?? "1h", // 5m | 1h | 6h | 24h
+    jupTrendingCategories: u.jupTrendingCategories ?? ["toptrending", "toptraded"], // datapi.jup.ag/v1/pools/{category}/{interval}
+    jupTrendingCacheTtlSec: u.jupTrendingCacheTtlSec ?? 300, // cache TTL (s) — shields datapi from the 45s opportunity poller
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
     blockPvpSymbols:   u.blockPvpSymbols   ?? false, // hard-filter PVP rivals before the LLM sees them
     maxBotHoldersPct:  u.maxBotHoldersPct  ?? 30,  // max bot holder addresses % (Jupiter audit)
@@ -108,6 +114,11 @@ export const config = {
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
     autoSwapRetryAttempts: u.autoSwapRetryAttempts ?? 3,    // retries for base→SOL auto-swap on Jupiter failure
     autoSwapRetryDelayMs:  u.autoSwapRetryDelayMs  ?? 3000, // delay between auto-swap retries
+    // Leftover-token sweep — management-cycle fallback for the post-close auto-swap
+    // (a >40s outage leaves the base token stranded; see sweepLeftoverTokens in executor.js)
+    sweepEnabled:          u.sweepEnabled          ?? true,
+    sweepMinUsd:           u.sweepMinUsd           ?? 1,    // ignore leftovers below this USD value
+    sweepExcludeMints:     u.sweepExcludeMints     ?? [],   // mints to never sweep (e.g. deliberately held via skip_swap)
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
@@ -153,6 +164,10 @@ export const config = {
     managementIntervalMin:  u.managementIntervalMin  ?? 10,
     screeningIntervalMin:   u.screeningIntervalMin   ?? 30,
     healthCheckIntervalMin: u.healthCheckIntervalMin ?? 60,
+    // Trading-hours window for AUTO screening (management always runs).
+    // UTC hours, [start, end); 0/24 = always on. Wraparound (18→6) supported.
+    screeningStartHourUtc:  u.screeningStartHourUtc  ?? 0,
+    screeningEndHourUtc:    u.screeningEndHourUtc    ?? 24,
   },
 
   // ─── LLM Settings ──────────────────────
@@ -310,12 +325,18 @@ export function reloadScreeningThresholds() {
     const fresh = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
     const s = config.screening;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
+    if (fresh.maxFeeActiveTvlRatio !== undefined) s.maxFeeActiveTvlRatio = fresh.maxFeeActiveTvlRatio;
     if (fresh.minTokenFeesSol  != null) s.minTokenFeesSol  = fresh.minTokenFeesSol;
     if (fresh.maxTop10Pct      != null) s.maxTop10Pct      = fresh.maxTop10Pct;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
     if (fresh.useGmgnTrending !== undefined) s.useGmgnTrending = fresh.useGmgnTrending;
     if (fresh.gmgnTrendingLimit != null) s.gmgnTrendingLimit = fresh.gmgnTrendingLimit;
+    if (fresh.useJupTrending !== undefined) s.useJupTrending = fresh.useJupTrending;
+    if (fresh.jupTrendingLimit != null) s.jupTrendingLimit = fresh.jupTrendingLimit;
+    if (fresh.jupTrendingInterval != null) s.jupTrendingInterval = fresh.jupTrendingInterval;
+    if (fresh.jupTrendingCategories !== undefined) s.jupTrendingCategories = fresh.jupTrendingCategories;
+    if (fresh.jupTrendingCacheTtlSec != null) s.jupTrendingCacheTtlSec = fresh.jupTrendingCacheTtlSec;
     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
     if (fresh.minOrganic     != null) s.minOrganic     = fresh.minOrganic;
     if (fresh.minQuoteOrganic != null) s.minQuoteOrganic = fresh.minQuoteOrganic;

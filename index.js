@@ -10,7 +10,7 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
-import { executeTool, registerCronRestarter } from "./tools/executor.js";
+import { executeTool, registerCronRestarter, sweepLeftoverTokens } from "./tools/executor.js";
 import {
   startPolling,
   stopPolling,
@@ -236,6 +236,11 @@ export async function runManagementCycle({ silent = false } = {}) {
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
 
+    // Sweep leftover base tokens (failed post-close auto-swaps) back to SOL.
+    // Runs before the 0-position early return — that is exactly the state a
+    // stranded token is in. Fire-and-forget; never blocks the cycle.
+    sweepLeftoverTokens().catch((e) => log("cron_error", `Leftover sweep failed: ${e.message}`));
+
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
       mgmtReport = "No open positions. Triggering screening cycle.";
@@ -374,10 +379,37 @@ function appendScreeningSkipOnce(reason) {
   });
 }
 
+// Trading-hours window: AUTO screening (cron, opportunity poller, startup kick)
+// only runs when the current UTC hour is inside [screeningStartHourUtc,
+// screeningEndHourUtc). Management cycles and the manual /screen command are
+// never gated — open positions stay managed, and the operator keeps an
+// override path. Wraparound windows (e.g. 18→6) are supported; the default
+// 0/24 (and any start===end) disables the gate. Returns null when screening
+// is allowed, else a stable skip-reason string (no current-hour in it, so
+// appendScreeningSkipOnce writes one decision entry per skipped streak).
+function screeningHourGateReason() {
+  const start = Number(config.schedule.screeningStartHourUtc ?? 0);
+  const end = Number(config.schedule.screeningEndHourUtc ?? 24);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  const s = ((Math.trunc(start) % 24) + 24) % 24;
+  const e = ((Math.trunc(end) % 24) + 24) % 24;
+  if (s === e) return null; // 0/24, 12/12, … = window disabled
+  const h = new Date().getUTCHours();
+  const inWindow = s < e ? h >= s && h < e : h >= s || h < e;
+  if (inWindow) return null;
+  return `outside screening hours (window ${s}:00–${e === 0 ? 24 : e}:00 UTC)`;
+}
+
 export async function runScreeningCycle({ silent = false } = {}) {
   if (_screeningBusy) {
     log("cron", "Screening skipped — previous cycle still running");
     return null;
+  }
+  const hourGateReason = screeningHourGateReason();
+  if (hourGateReason) {
+    log("cron", `Screening skipped — ${hourGateReason} (now ${new Date().getUTCHours()}:00 UTC)`);
+    appendScreeningSkipOnce(hourGateReason);
+    return `Screening skipped — ${hourGateReason}.`;
   }
   _screeningBusy = true; // set immediately — prevents TOCTOU race with concurrent callers
   _screeningLastTriggered = Date.now();
@@ -545,6 +577,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const signalBits = [
         pool.discord_signal ? `discord_signal×${pool.discord_signal_count || 1}` : null,
         pool.gmgn_trending ? `gmgn_trending#${pool.gmgn_trending_rank ?? "?"}${pool.gmgn_smart_degen_count != null ? ` smart_degens=${pool.gmgn_smart_degen_count}` : ""}` : null,
+        pool.jup_trending ? `jup_trending#${pool.jup_trending_rank ?? "?"}${pool.jup_trending_category ? ` (${pool.jup_trending_category})` : ""}` : null,
       ].filter(Boolean);
 
       const block = [
@@ -577,6 +610,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
           gmgn_trending:         Boolean(pool.gmgn_trending),
           gmgn_trending_rank:    pool.gmgn_trending_rank    ?? null,
           gmgn_smart_degen_count: pool.gmgn_smart_degen_count ?? null,
+          jup_trending:          Boolean(pool.jup_trending),
+          jup_trending_rank:     pool.jup_trending_rank     ?? null,
+          jup_trending_category: pool.jup_trending_category ?? null,
           discord_signal:        Boolean(pool.discord_signal),
           discord_signal_count:  pool.discord_signal_count  ?? null,
         });
@@ -1070,6 +1106,7 @@ function settingValue(key) {
     trailingTakeProfit: config.management.trailingTakeProfit,
     useDiscordSignals: config.screening.useDiscordSignals,
     useGmgnTrending: config.screening.useGmgnTrending,
+    useJupTrending: config.screening.useJupTrending,
     blockPvpSymbols: config.screening.blockPvpSymbols,
     strategy: config.strategy.strategy,
     minBinsBelow: config.strategy.minBinsBelow,
@@ -1169,7 +1206,7 @@ function renderSettingsMenu(page = "main") {
   } else if (page === "screen") {
     rows = [
       [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
-      [toggleButton("useGmgnTrending", "GMGN trending")],
+      [toggleButton("useGmgnTrending", "GMGN trending"), toggleButton("useJupTrending", "Jup trending")],
       [
         settingButton(`Strategy: spot`, "cfg:set:strategy:spot"),
         settingButton(`Strategy: bid_ask`, "cfg:set:strategy:bid_ask"),
@@ -1298,7 +1335,7 @@ async function applySettingsMenuCallback(msg) {
   }
   page = key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
     ? "indicators"
-    : ["useDiscordSignals", "useGmgnTrending", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
+    : ["useDiscordSignals", "useGmgnTrending", "useJupTrending", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
       ? "screen"
       : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);

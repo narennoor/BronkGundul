@@ -6,6 +6,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { getGmgnTrendingTokens, hasGmgnApiKey } from "./gmgn.js";
+import { getJupTrendingTokens } from "./jupiter-trending.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -169,6 +170,9 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (feeActiveTvlRatio == null || feeActiveTvlRatio < s.minFeeActiveTvlRatio) {
     return `fee/active-TVL ${feeActiveTvlRatio ?? "unknown"} below minFeeActiveTvlRatio ${s.minFeeActiveTvlRatio}`;
   }
+  if (s.maxFeeActiveTvlRatio != null && s.maxFeeActiveTvlRatio > 0 && feeActiveTvlRatio > s.maxFeeActiveTvlRatio) {
+    return `fee/active-TVL ${feeActiveTvlRatio} above maxFeeActiveTvlRatio ${s.maxFeeActiveTvlRatio}`;
+  }
   if (!isUsableVolatility(volatility)) {
     return `volatility ${volatility ?? "unknown"} is unusable`;
   }
@@ -179,7 +183,7 @@ function getRawPoolScreeningRejectReason(pool, s) {
     return `quote organic ${quoteOrganic ?? "unknown"} below minQuoteOrganic ${s.minQuoteOrganic}`;
   }
   if (
-    (pool?.discord_signal || pool?.gmgn_trending) &&
+    (pool?.discord_signal || pool?.gmgn_trending || pool?.jup_trending) &&
     Array.isArray(s.allowedLaunchpads) &&
     s.allowedLaunchpads.length > 0 &&
     launchpad &&
@@ -497,6 +501,68 @@ async function mergeGmgnTrendingPools(rawPools, s) {
 }
 
 /**
+ * Merge Jupiter datapi trending/toptraded tokens into the discovery pool set
+ * (token-first source, same contract as mergeGmgnTrendingPools). Each trending
+ * mint is resolved to its highest-TVL DLMM pool, then re-fetched from the pool
+ * discovery API so the object shape matches native discovery pools — every
+ * downstream filter/enrichment applies unchanged. Mints whose pool is already
+ * in the discovery set just get tagged (confirmation signal).
+ */
+async function mergeJupTrendingPools(rawPools, s) {
+  const trendingTokens = await getJupTrendingTokens({ limit: s.jupTrendingLimit });
+  if (trendingTokens.length === 0) return rawPools;
+
+  const tagPool = (pool, token) => {
+    pool.jup_trending = true;
+    pool.jup_trending_rank = token.rank;
+    pool.jup_trending_category = token.category;
+    if (token.launchpad && !getPoolLaunchpad(pool)) pool.base_token_launchpad = token.launchpad;
+  };
+
+  const byMint = new Map();
+  for (const pool of rawPools) {
+    const mint = getPoolBaseMint(pool);
+    if (mint && !byMint.has(mint)) byMint.set(mint, pool);
+  }
+
+  const unresolved = [];
+  let tagged = 0;
+  for (const token of trendingTokens) {
+    const existing = byMint.get(token.mint);
+    if (existing) {
+      tagPool(existing, token);
+      tagged++;
+    } else if (!isBlacklisted(token.mint)) {
+      unresolved.push(token);
+    }
+  }
+
+  const minTvl = Math.max(1, Number(s.minTvl) || 1);
+  const resolved = await Promise.allSettled(
+    unresolved.map(async (token) => {
+      const match = await findTopDlmmPoolByMint(token.mint, minTvl);
+      const poolAddress = match?.address || match?.pool_address;
+      if (!poolAddress) return null;
+      const pool = await fetchPoolDiscoveryDetail({ poolAddress, timeframe: s.timeframe });
+      if (!pool) return null;
+      tagPool(pool, token);
+      return pool;
+    })
+  );
+
+  const byPool = new Map(rawPools.map((pool) => [pool.pool_address, pool]));
+  let added = 0;
+  for (const result of resolved) {
+    const pool = result.status === "fulfilled" ? result.value : null;
+    if (!pool?.pool_address || byPool.has(pool.pool_address)) continue;
+    byPool.set(pool.pool_address, pool);
+    added++;
+  }
+  log("screening", `Jup trending: ${trendingTokens.length} token(s) → ${added} new pool(s) merged, ${tagged} existing tagged`);
+  return Array.from(byPool.values());
+}
+
+/**
  * Fetch pools from the Meteora Pool Discovery API.
  * Returns condensed data optimized for LLM consumption (saves tokens).
  */
@@ -519,6 +585,7 @@ export async function discoverPools({
     `dlmm_bin_step>=${s.minBinStep}`,
     `dlmm_bin_step<=${s.maxBinStep}`,
     `fee_active_tvl_ratio>=${s.minFeeActiveTvlRatio}`,
+    s.maxFeeActiveTvlRatio != null ? `fee_active_tvl_ratio<=${s.maxFeeActiveTvlRatio}` : null,
     `base_token_organic_score>=${s.minOrganic}`,
     `quote_token_organic_score>=${s.minQuoteOrganic}`,
     s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
@@ -591,6 +658,13 @@ export async function discoverPools({
   if (s.useGmgnTrending && hasGmgnApiKey()) {
     rawPools = await mergeGmgnTrendingPools(rawPools, s).catch((error) => {
       log("screening", `GMGN trending merge failed: ${error.message}`);
+      return rawPools;
+    });
+  }
+
+  if (s.useJupTrending) {
+    rawPools = await mergeJupTrendingPools(rawPools, s).catch((error) => {
+      log("screening", `Jup trending merge failed: ${error.message}`);
       return rawPools;
     });
   }
@@ -683,6 +757,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const minTvl = Number(config.screening.minTvl ?? 0);
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
   const minFeeActiveTvlRatio = Number(config.screening.minFeeActiveTvlRatio ?? 0);
+  const maxFeeActiveTvlRatio = config.screening.maxFeeActiveTvlRatio == null ? null : Number(config.screening.maxFeeActiveTvlRatio);
 
   const eligible = pools
     .filter((p) => {
@@ -698,6 +773,10 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       const feeActiveTvlRatio = Number(p.fee_active_tvl_ratio);
       if (Number.isFinite(minFeeActiveTvlRatio) && minFeeActiveTvlRatio > 0 && (!Number.isFinite(feeActiveTvlRatio) || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
         pushFilteredReason(filteredOut, p, `fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
+        return false;
+      }
+      if (maxFeeActiveTvlRatio != null && maxFeeActiveTvlRatio > 0 && Number.isFinite(feeActiveTvlRatio) && feeActiveTvlRatio > maxFeeActiveTvlRatio) {
+        pushFilteredReason(filteredOut, p, `fee/active-TVL ${feeActiveTvlRatio} above maxFeeActiveTvlRatio ${maxFeeActiveTvlRatio}`);
         return false;
       }
       if (!isUsableVolatility(p.volatility)) {
@@ -876,6 +955,9 @@ function condensePool(p) {
     gmgn_trending: Boolean(p.gmgn_trending),
     gmgn_trending_rank: p.gmgn_trending_rank ?? null,
     gmgn_smart_degen_count: p.gmgn_smart_degen_count ?? null,
+    jup_trending: Boolean(p.jup_trending),
+    jup_trending_rank: p.jup_trending_rank ?? null,
+    jup_trending_category: p.jup_trending_category ?? null,
 
     // Price action
     price: p.pool_price,
