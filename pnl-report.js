@@ -118,9 +118,13 @@ export async function computePnlReport() {
   let gasSol = 0, gasTxn = 0, depositIn = 0, withdrawOut = 0;
   for (const t of txs) {
     if (t.feePayer === wallet) { gasSol += t.fee / 1e9; gasTxn++; }
+    // SOL arriving while the wallet sends tokens in the same tx is a swap fill
+    // (Jupiter RFQ: the market maker is feePayer and pays out via system
+    // transfer), not a deposit.
+    const isSwapFill = (t.tokenTransfers || []).some((tt) => tt.fromUserAccount === wallet);
     for (const nt of t.nativeTransfers || []) {
       if (nt.amount <= 5e6) continue;
-      if (nt.toUserAccount === wallet && t.feePayer !== wallet) depositIn += nt.amount / 1e9;
+      if (nt.toUserAccount === wallet && t.feePayer !== wallet && !isSwapFill) depositIn += nt.amount / 1e9;
       if (nt.fromUserAccount === wallet && t.feePayer === wallet && t.type === "TRANSFER") withdrawOut += nt.amount / 1e9;
     }
   }
