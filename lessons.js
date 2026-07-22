@@ -175,6 +175,7 @@ export async function recordPerformance(perf) {
       close_reason: perf.close_reason,
       strategy: perf.strategy,
       volatility: perf.volatility,
+      base_fee: perf.base_fee ?? null,
       entry_mcap: perf.entry_mcap,
       entry_tvl: perf.entry_tvl,
       entry_volume: perf.entry_volume,
