@@ -114,6 +114,35 @@ function shouldRequireRealToolUse(goal, agentType, interactive = false) {
   return interactive && LIVE_DATA_TOOL_INTENTS.test(goal);
 }
 
+// ─── Anthropic prompt caching (via OpenRouter) ───
+// Every loop step re-sends the whole conversation at full input price. For
+// anthropic/* models, a cache_control breakpoint on the system prompt (which
+// also covers the tool definitions before it) and one on the last message let
+// each step read the previous step's prefix at 10% of the input price
+// (cache writes cost 1.25x, amortized after a single hit within the 5-min TTL).
+const CACHEABLE_MODEL = /^anthropic\//i;
+
+function toCachedParts(content) {
+  return [{ type: "text", text: content, cache_control: { type: "ephemeral" } }];
+}
+
+function withCacheControl(messages, model) {
+  if (config.llm.promptCaching === false || !CACHEABLE_MODEL.test(model)) return messages;
+  const out = messages.map((m) => ({ ...m }));
+  const sys = out[0]?.role === "system" && typeof out[0].content === "string" ? out[0] : null;
+  if (sys) sys.content = toCachedParts(sys.content);
+  const last = out[out.length - 1];
+  if (last && last !== sys && (last.role === "user" || last.role === "tool") && typeof last.content === "string" && last.content) {
+    last.content = toCachedParts(last.content);
+  }
+  return out;
+}
+
+function isCacheControlError(error) {
+  const message = String(error?.message || error?.error?.message || error || "");
+  return /cache_control/i.test(message) || /invalid.{0,40}content|content.{0,40}(?:must be a string|invalid)/i.test(message);
+}
+
 function buildMessages(systemPrompt, sessionHistory, goal, providerMode = "system") {
   if (providerMode === "user_embedded") {
     return [
@@ -186,6 +215,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   let noToolRetryCount = 0;
   // Stays true for the whole run once a thinking-mode provider rejects tool_choice
   let omitToolChoice = false;
+  // Stays true for the whole run once a provider rejects cache_control formatting
+  let cachingDisabled = false;
 
   let emptyStreak = 0;
   for (let step = 0; step < maxSteps; step++) {
@@ -206,7 +237,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         try {
           const reqParams = {
             model: usedModel,
-            messages,
+            messages: cachingDisabled ? messages : withCacheControl(messages, usedModel),
             tools: getToolsForRole(agentType, goal),
             temperature: config.llm.temperature,
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
@@ -233,6 +264,12 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
+          if (!cachingDisabled && isCacheControlError(error)) {
+            cachingDisabled = true;
+            log("agent", "Provider rejected cache_control formatting — retrying without prompt caching");
+            attempt -= 1;
+            continue;
+          }
           throw error;
         }
         if (response.choices?.length) break;
@@ -254,6 +291,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       if (!response.choices?.length) {
         log("error", `Bad API response: ${JSON.stringify(response).slice(0, 200)}`);
         throw new Error(`API returned no choices: ${response.error?.message || JSON.stringify(response)}`);
+      }
+      if (response.usage) {
+        const cached = response.usage.prompt_tokens_details?.cached_tokens ?? 0;
+        log("agent", `Tokens: in=${response.usage.prompt_tokens} (cached=${cached}) out=${response.usage.completion_tokens}`);
       }
       const msg = response.choices[0].message;
       const invalidToolArgErrors = new Map();
