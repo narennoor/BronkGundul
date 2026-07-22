@@ -79,6 +79,29 @@ export function getAndClearStagedSignals(poolAddress, baseMint = null) {
 }
 
 /**
+ * Peek staged signals for a pool WITHOUT clearing them.
+ * Used by deployPosition to read screening-time signals (e.g. smart_wallets_present)
+ * before the position exists — getAndClearStagedSignals still runs after the deploy
+ * to consume the entry for the snapshot.
+ */
+export function peekStagedSignals(poolAddress, baseMint = null) {
+  cleanupStale();
+
+  let poolKey = normalizeKey(poolAddress);
+  let data = poolKey ? _staged.get(poolKey) : null;
+
+  if (!data && baseMint) {
+    const baseKey = normalizeKey(baseMint);
+    poolKey = baseKey ? _stagedByBaseMint.get(baseKey) : null;
+    data = poolKey ? _staged.get(poolKey) : null;
+  }
+
+  if (!data) return null;
+  const { staged_at, ...signals } = data;
+  return signals;
+}
+
+/**
  * Get all currently staged pool addresses (for debugging).
  */
 export function getStagedPools() {

@@ -28,7 +28,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
-import { getAndClearStagedSignals } from "../signal-tracker.js";
+import { getAndClearStagedSignals, peekStagedSignals } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
@@ -537,7 +537,7 @@ export async function deployPosition({
     amount_y == null && amount_sol == null
       ? computeDeployAmount((await getWalletBalances()).sol)
       : 0;
-  const finalAmountY = Number(amount_y ?? amount_sol ?? fallbackAmountY);
+  let finalAmountY = Number(amount_y ?? amount_sol ?? fallbackAmountY);
   const finalAmountX = Number(amount_x ?? 0);
   if (!Number.isFinite(finalAmountY) || !Number.isFinite(finalAmountX) || finalAmountY < 0 || finalAmountX < 0) {
     throw new Error("Invalid deploy amount: amount_x and amount_y must be valid non-negative numbers.");
@@ -557,6 +557,36 @@ export async function deployPosition({
   if (isSingleSidedSol) {
     activeBinsAbove = 0;
   }
+
+  // Smart-wallet size bonus — a tracked smart wallet present at screening time boosts
+  // the deploy amount by smartWalletSizeBonusPct (era #3: smart_wallets_present closes
+  // mean $1.43 vs $0.10 without, n=62/165). Clamped to maxDeployAmount and the wallet's
+  // spendable balance so the executor's pre-flight balance check stays valid.
+  let swSizeBoosted = false;
+  const swBonusPct = Number(config.management.smartWalletSizeBonusPct ?? 0);
+  if (swBonusPct > 0 && isSingleSidedSol && finalAmountY > 0) {
+    try {
+      const staged = peekStagedSignals(pool_address, baseMint);
+      if (staged?.smart_wallets_present === true) {
+        const walletSol = (await getWalletBalances()).sol;
+        const gasReserve = Number(config.management.gasReserve ?? 0.2);
+        const spendable = Math.max(0, walletSol - gasReserve);
+        const boosted = Math.min(
+          finalAmountY * (1 + swBonusPct / 100),
+          Number(config.risk.maxDeployAmount ?? finalAmountY),
+          spendable,
+        );
+        if (boosted > finalAmountY) {
+          log("deploy", `Smart-wallet size bonus: ${finalAmountY} -> ${boosted.toFixed(2)} SOL (+${swBonusPct}%)`);
+          finalAmountY = parseFloat(boosted.toFixed(2));
+          swSizeBoosted = true;
+        }
+      }
+    } catch (error) {
+      log("deploy", `Smart-wallet size bonus skipped: ${error.message}`);
+    }
+  }
+
   activeBinsBelow = Number(activeBinsBelow);
   activeBinsAbove = Number(activeBinsAbove);
   if (!Number.isFinite(activeBinsBelow) || !Number.isFinite(activeBinsAbove)) {
@@ -588,6 +618,7 @@ export async function deployPosition({
         upside_pct: upside_pct ?? null,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
+        sw_size_boosted: swSizeBoosted,
         wide_range: totalBins > 69,
       },
       message: "DRY RUN — no transaction sent",
@@ -701,6 +732,7 @@ export async function deployPosition({
           bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
           bin_step: bin_step ?? actualBinStep,
           base_fee: actualBaseFee,
+          sw_size_boosted: swSizeBoosted,
           volatility: normalizedVolatility,
           fee_tvl_ratio,
           organic_score,
@@ -756,6 +788,7 @@ export async function deployPosition({
         },
         bin_step: actualBinStep,
         base_fee: actualBaseFee,
+        sw_size_boosted: swSizeBoosted,
         strategy: activeStrategy,
         wide_range: isWideRange,
         amount_x: finalAmountX,
@@ -844,6 +877,7 @@ export async function deployPosition({
       bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
       bin_step: bin_step ?? actualBinStep,
       base_fee: actualBaseFee,
+      sw_size_boosted: swSizeBoosted,
       volatility: normalizedVolatility,
       fee_tvl_ratio,
       organic_score,
@@ -896,6 +930,7 @@ export async function deployPosition({
       },
       bin_step: actualBinStep,
       base_fee: actualBaseFee,
+      sw_size_boosted: swSizeBoosted,
       strategy: activeStrategy,
       wide_range: isWideRange,
       amount_x: finalAmountX,
@@ -1679,6 +1714,7 @@ export async function closePosition({ position_address, reason }) {
           bin_range: tracked.bin_range,
           bin_step: tracked.bin_step || null,
           base_fee: tracked.base_fee ?? null,
+          sw_size_boosted: tracked.sw_size_boosted ?? false,
           volatility: tracked.volatility ?? null,
           fee_tvl_ratio: tracked.fee_tvl_ratio || null,
           organic_score: tracked.organic_score || null,
@@ -1985,6 +2021,7 @@ export async function closePosition({ position_address, reason }) {
         bin_range: tracked.bin_range,
         bin_step: tracked.bin_step || null,
         base_fee: tracked.base_fee ?? null,
+        sw_size_boosted: tracked.sw_size_boosted ?? false,
         volatility: tracked.volatility ?? null,
         fee_tvl_ratio: tracked.fee_tvl_ratio || null,
         organic_score: tracked.organic_score || null,

@@ -156,6 +156,10 @@ export const config = {
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
     gasReserve:            u.gasReserve            ?? 0.2,
     positionSizePct:       u.positionSizePct       ?? 0.35,
+    // Smart-wallet size bonus — % added to the deploy amount when a tracked smart wallet
+    // is present on the pool at screening time (era #3: mean $1.43/close with smart wallet
+    // vs $0.10 without, n=62/165). Clamped to maxDeployAmount + spendable balance. 0 disables.
+    smartWalletSizeBonusPct: u.smartWalletSizeBonusPct ?? 0,
     // Trailing take-profit
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
