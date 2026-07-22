@@ -371,6 +371,8 @@ const toolMap = {
       // screening
       minFeeActiveTvlRatio: ["screening", "minFeeActiveTvlRatio"],
       maxFeeActiveTvlRatio: ["screening", "maxFeeActiveTvlRatio"],
+      funnelStatsEnabled: ["screening", "funnelStatsEnabled"],
+      funnelShadowEveryNCycles: ["screening", "funnelShadowEveryNCycles"],
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
       minTvl: ["screening", "minTvl"],
       maxTvl: ["screening", "maxTvl"],

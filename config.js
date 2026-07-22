@@ -87,6 +87,11 @@ export const config = {
     maxBinStep:        u.maxBinStep        ?? 125,
     timeframe:         u.timeframe         ?? "5m",
     category:          u.category          ?? "trending",
+    // Funnel kill-count instrumentation (observability only, never changes filtering).
+    // funnelShadowEveryNCycles: every N screening cycles run one minimal-query discovery
+    // fetch and attribute kills for server-side filters. 0 disables the shadow run.
+    funnelStatsEnabled:       u.funnelStatsEnabled       ?? true,
+    funnelShadowEveryNCycles: u.funnelShadowEveryNCycles ?? 12,
     minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam
     useDiscordSignals: u.useDiscordSignals ?? false,
     discordSignalMode: u.discordSignalMode ?? "merge", // merge | only

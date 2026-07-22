@@ -829,49 +829,65 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const minFeeActiveTvlRatio = Number(config.screening.minFeeActiveTvlRatio ?? 0);
   const maxFeeActiveTvlRatio = config.screening.maxFeeActiveTvlRatio == null ? null : Number(config.screening.maxFeeActiveTvlRatio);
 
+  // Funnel instrumentation (observe-all): every check below records its failure
+  // instead of short-circuiting, so funnel-stats.json can attribute kills and
+  // unique-kills per filter. Filtering OUTCOME is unchanged — a pool is eligible
+  // iff failures is empty, same as the old first-failure-wins chain.
+  const funnelEnabled = config.screening.funnelStatsEnabled !== false;
+  const killedFailures = []; // string[][] — all failed filter names per killed pool
+
   const eligible = pools
     .filter((p) => {
+      const failures = [];
+      const reasons = [];
       const tvl = Number(p.tvl ?? p.active_tvl ?? 0);
       if (Number.isFinite(minTvl) && minTvl > 0 && tvl < minTvl) {
-        pushFilteredReason(filteredOut, p, `TVL $${tvl} below minTvl $${minTvl}`);
-        return false;
+        failures.push("minTvl");
+        reasons.push(`TVL $${tvl} below minTvl $${minTvl}`);
       }
       if (Number.isFinite(maxTvl) && maxTvl > 0 && tvl > maxTvl) {
-        pushFilteredReason(filteredOut, p, `TVL $${tvl} above maxTvl $${maxTvl}`);
-        return false;
+        failures.push("maxTvl");
+        reasons.push(`TVL $${tvl} above maxTvl $${maxTvl}`);
       }
       const feeActiveTvlRatio = Number(p.fee_active_tvl_ratio);
       if (Number.isFinite(minFeeActiveTvlRatio) && minFeeActiveTvlRatio > 0 && (!Number.isFinite(feeActiveTvlRatio) || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
-        pushFilteredReason(filteredOut, p, `fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
-        return false;
+        failures.push("minFeeActiveTvlRatio");
+        reasons.push(`fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
       }
       if (maxFeeActiveTvlRatio != null && maxFeeActiveTvlRatio > 0 && Number.isFinite(feeActiveTvlRatio) && feeActiveTvlRatio > maxFeeActiveTvlRatio) {
-        pushFilteredReason(filteredOut, p, `fee/active-TVL ${feeActiveTvlRatio} above maxFeeActiveTvlRatio ${maxFeeActiveTvlRatio}`);
-        return false;
+        failures.push("maxFeeActiveTvlRatio");
+        reasons.push(`fee/active-TVL ${feeActiveTvlRatio} above maxFeeActiveTvlRatio ${maxFeeActiveTvlRatio}`);
       }
       if (!isUsableVolatility(p.volatility)) {
-        pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "unknown"} is unusable`);
-        return false;
+        failures.push("volatilityUnusable");
+        reasons.push(`volatility ${p.volatility ?? "unknown"} is unusable`);
       }
       if (occupiedPools.has(p.pool)) {
-        pushFilteredReason(filteredOut, p, "already have an open position in this pool");
-        return false;
+        failures.push("occupiedPool");
+        reasons.push("already have an open position in this pool");
       }
       if (occupiedMints.has(p.base?.mint)) {
-        pushFilteredReason(filteredOut, p, "already holding this base token in another pool");
-        return false;
+        failures.push("occupiedMint");
+        reasons.push("already holding this base token in another pool");
       }
-      if (isPoolOnCooldown(p.pool)) {
-        log("screening", `Filtered cooldown pool ${p.name} (${p.pool.slice(0, 8)})`);
-        pushFilteredReason(filteredOut, p, "pool cooldown active");
-        return false;
+      // Cooldown checks cost a pool-memory.json read each — only evaluate them
+      // for pools that passed everything else. Their kills are therefore always
+      // unique kills (the pool would have passed but for the cooldown).
+      if (failures.length === 0) {
+        if (isPoolOnCooldown(p.pool)) {
+          log("screening", `Filtered cooldown pool ${p.name} (${p.pool.slice(0, 8)})`);
+          failures.push("poolCooldown");
+          reasons.push("pool cooldown active");
+        } else if (isBaseMintOnCooldown(p.base?.mint)) {
+          log("screening", `Filtered cooldown token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
+          failures.push("tokenCooldown");
+          reasons.push("token cooldown active");
+        }
       }
-      if (isBaseMintOnCooldown(p.base?.mint)) {
-        log("screening", `Filtered cooldown token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
-        pushFilteredReason(filteredOut, p, "token cooldown active");
-        return false;
-      }
-      return true;
+      if (failures.length === 0) return true;
+      pushFilteredReason(filteredOut, p, reasons[0]);
+      if (funnelEnabled) killedFailures.push(failures);
+      return false;
     })
     .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
     .slice(0, limit);
@@ -881,7 +897,10 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     if (config.screening.blockPvpSymbols) {
       const before = eligible.length;
       const pvpRemoved = eligible.filter((p) => p.is_pvp);
-      pvpRemoved.forEach((p) => pushFilteredReason(filteredOut, p, "PVP hard filter"));
+      pvpRemoved.forEach((p) => {
+        pushFilteredReason(filteredOut, p, "PVP hard filter");
+        if (funnelEnabled) killedFailures.push(["pvpHardFilter"]);
+      });
       eligible.splice(0, eligible.length, ...eligible.filter((p) => !p.is_pvp));
       if (eligible.length < before) {
         log("screening", `PVP hard filter removed ${before - eligible.length} pool(s)`);
@@ -896,6 +915,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (p.dev && isDevBlocked(p.dev)) {
         log("dev_blocklist", `Filtered blocked deployer ${p.dev.slice(0, 8)} token ${p.base?.symbol}`);
         pushFilteredReason(filteredOut, p, "blocked deployer");
+        if (funnelEnabled) killedFailures.push(["blockedDeployer"]);
         return false;
       }
       return true;
@@ -934,6 +954,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       pool.indicator_confirmation = confirmation || null;
       if (!confirmation || confirmation.confirmed) return true;
       pushFilteredReason(filteredOut, pool, `indicator reject: ${confirmation.reason}`);
+      if (funnelEnabled) killedFailures.push(["indicatorReject"]);
       log("screening", `Indicator rejected ${pool.name} (${pool.pool.slice(0, 8)}): ${confirmation.reason}`);
       return false;
     });
@@ -943,11 +964,92 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     }
   }
 
+  // Funnel stats write + periodic shadow run. Observability only — never throws
+  // into the screening path, never changes candidates.
+  if (funnelEnabled) {
+    try {
+      const { recordFunnelCycle, getFunnelStats, summarizeFunnel } = await import("../funnel-stats.js");
+      const stats = recordFunnelCycle("client", {
+        poolsSeen: pools.length,
+        passed: eligible.length,
+        failuresByPool: killedFailures,
+      });
+      log("funnel", summarizeFunnel("client"));
+      const everyN = Number(config.screening.funnelShadowEveryNCycles ?? 12);
+      if (everyN > 0 && (stats.client.cycles % everyN === 1 || everyN === 1)) {
+        runShadowFunnel().catch((error) => log("funnel", `Shadow funnel failed: ${error.message}`));
+      }
+    } catch (error) {
+      log("funnel", `Funnel stats failed: ${error.message}`);
+    }
+  }
+
   return {
     candidates: eligible,
     total_screened: pools.length,
     filtered_examples: filteredOut.slice(0, 3),
   };
+}
+
+/**
+ * Shadow funnel (Tier 2) — fetch discovery with a minimal query (pool_type +
+ * volume baseline only) and apply ALL configured screening thresholds
+ * client-side, counting which filter kills what. This attributes kills for
+ * filters normally enforced server-side inside the discovery query (mcap,
+ * holders, bin step, fee band, organic, age), which the client otherwise
+ * never sees. Launchpad allow/block lists and critical-warning flags are not
+ * simulated (fields not reliably present on the raw objects).
+ */
+export async function runShadowFunnel() {
+  const s = config.screening;
+  const baselineVolume = Math.min(500, Number(s.minVolume) || 500);
+  const filters = ["pool_type=dlmm", `volume>=${baselineVolume}`].join("&&");
+  const data = await fetchPoolDiscoveryPage({
+    page_size: 100,
+    filters,
+    timeframe: s.timeframe,
+    category: s.category,
+  });
+  const rawPools = Array.isArray(data.data) ? data.data : [];
+  const failuresByPool = [];
+  let passed = 0;
+  for (const p of rawPools) {
+    const failures = shadowThresholdFailures(p, s);
+    if (failures.length === 0) passed += 1;
+    else failuresByPool.push(failures);
+  }
+  const { recordFunnelCycle, summarizeFunnel } = await import("../funnel-stats.js");
+  recordFunnelCycle("shadow", { poolsSeen: rawPools.length, passed, failuresByPool });
+  log("funnel", `Shadow run: ${rawPools.length} pools @ volume>=${baselineVolume}, ${passed} pass all thresholds | ${summarizeFunnel("shadow")}`);
+}
+
+/** All configured threshold failures for one RAW discovery pool object. */
+function shadowThresholdFailures(p, s) {
+  const failures = [];
+  const mcap = Number(p.token_x?.market_cap ?? NaN);
+  if (Number(s.minMcap) > 0 && !(mcap >= Number(s.minMcap))) failures.push("minMcap");
+  if (s.maxMcap != null && !(mcap <= Number(s.maxMcap))) failures.push("maxMcap");
+  const holders = Number(p.base_token_holders ?? NaN);
+  if (Number(s.minHolders) > 0 && !(holders >= Number(s.minHolders))) failures.push("minHolders");
+  const volume = Number(p.volume ?? NaN);
+  if (Number(s.minVolume) > 0 && !(volume >= Number(s.minVolume))) failures.push("minVolume");
+  const tvl = Number(p.tvl ?? NaN);
+  if (Number(s.minTvl) > 0 && !(tvl >= Number(s.minTvl))) failures.push("minTvl");
+  if (s.maxTvl != null && !(tvl <= Number(s.maxTvl))) failures.push("maxTvl");
+  const binStep = Number(p.dlmm_params?.bin_step ?? NaN);
+  if (Number(s.minBinStep) > 0 && !(binStep >= Number(s.minBinStep))) failures.push("minBinStep");
+  if (Number(s.maxBinStep) > 0 && !(binStep <= Number(s.maxBinStep))) failures.push("maxBinStep");
+  const ratio = Number(p.fee_active_tvl_ratio ?? NaN);
+  if (Number(s.minFeeActiveTvlRatio) > 0 && !(ratio >= Number(s.minFeeActiveTvlRatio))) failures.push("minFeeActiveTvlRatio");
+  if (s.maxFeeActiveTvlRatio != null && Number(s.maxFeeActiveTvlRatio) > 0 && Number.isFinite(ratio) && ratio > Number(s.maxFeeActiveTvlRatio)) failures.push("maxFeeActiveTvlRatio");
+  const organic = Number(p.token_x?.organic_score ?? NaN);
+  if (Number(s.minOrganic) > 0 && !(organic >= Number(s.minOrganic))) failures.push("minOrganic");
+  const quoteOrganic = Number(p.token_y?.organic_score ?? NaN);
+  if (Number(s.minQuoteOrganic) > 0 && !(quoteOrganic >= Number(s.minQuoteOrganic))) failures.push("minQuoteOrganic");
+  const createdAt = Number(p.token_x?.created_at ?? NaN);
+  if (s.minTokenAgeHours != null && Number.isFinite(createdAt) && Date.now() - createdAt < Number(s.minTokenAgeHours) * 3_600_000) failures.push("minTokenAgeHours");
+  if (s.maxTokenAgeHours != null && Number.isFinite(createdAt) && Date.now() - createdAt > Number(s.maxTokenAgeHours) * 3_600_000) failures.push("maxTokenAgeHours");
+  return failures;
 }
 
 /**
