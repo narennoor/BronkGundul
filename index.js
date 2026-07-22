@@ -1367,6 +1367,7 @@ function formatHelpText() {
     "/candidates — show latest cached candidates",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
+    "/pnl — full PnL report (bookkeeping vs on-chain, all costs)",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
@@ -1502,6 +1503,18 @@ async function telegramHandler(msg) {
       await sendHTML(briefing);
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/pnl") {
+    try {
+      await sendMessage("⏳ Menghitung PnL on-chain (±30 detik)...").catch(() => {});
+      const { computePnlReport, formatPnlReport } = await import("./pnl-report.js");
+      const report = await computePnlReport();
+      await sendHTML(formatPnlReport(report, { html: true }));
+    } catch (e) {
+      await sendMessage(`PnL error: ${e.message}`).catch(() => {});
     }
     return;
   }
@@ -1899,6 +1912,7 @@ Commands:
   /status        Refresh wallet + positions
   /candidates    Refresh top pool list
   /briefing      Show morning briefing (last 24h)
+  /pnl           Full PnL report (bookkeeping vs on-chain, all costs)
   /learn         Study top LPers from the best current pool and save lessons
   /learn <addr>  Study top LPers from a specific pool address
   /thresholds    Show current screening thresholds + performance stats
@@ -1975,6 +1989,15 @@ Commands:
       await runBusy(async () => {
         const briefing = await generateBriefing();
         console.log(`\n${briefing.replace(/<[^>]*>/g, "")}\n`);
+      });
+      return;
+    }
+
+    if (input === "/pnl") {
+      await runBusy(async () => {
+        const { computePnlReport, formatPnlReport } = await import("./pnl-report.js");
+        const report = await computePnlReport();
+        console.log(`\n${formatPnlReport(report)}\n`);
       });
       return;
     }
