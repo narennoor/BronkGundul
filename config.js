@@ -172,6 +172,11 @@ export const config = {
   // ─── Strategy Mapping ───────────────────
   strategy: {
     strategy:     u.strategy     ?? "bid_ask",
+    // "fixed" = always use `strategy` above; "auto" = deterministic per-deploy picker
+    // (bins_below < spotBinsThreshold → spot, else `strategy`). LLM/user-explicit
+    // strategy always wins over the picker.
+    strategyMode: u.strategyMode ?? "fixed",
+    spotBinsThreshold: numericConfig(u.spotBinsThreshold) ?? 40,
     minBinsBelow: strategyMinBinsBelow,
     maxBinsBelow: strategyMaxBinsBelow,
     defaultBinsBelow: strategyDefaultBinsBelow,

@@ -448,6 +448,24 @@ export async function getActiveBin({ pool_address }) {
   };
 }
 
+// ─── Strategy Picker ───────────────────────────────────────────
+// Deterministic per-deploy strategy selection ("JS decides, LLM executes").
+// Only active when config.strategy.strategyMode === "auto": a range narrower than
+// spotBinsThreshold (the bins_below formula output on low-volatility pools)
+// deploys as spot, everything else keeps the configured default strategy.
+// An explicit LLM/user strategy always wins over the picker.
+export function pickDeployStrategy(binsBelow) {
+  const fallback = { strategy: config.strategy.strategy, source: "config" };
+  if (String(config.strategy.strategyMode || "fixed").toLowerCase() !== "auto") return fallback;
+  const threshold = Number(config.strategy.spotBinsThreshold);
+  const bins = Number(binsBelow);
+  if (!Number.isFinite(threshold) || !Number.isFinite(bins)) return fallback;
+  return {
+    strategy: bins < threshold ? "spot" : config.strategy.strategy,
+    source: "auto_picker",
+  };
+}
+
 // ─── Deploy Position ───────────────────────────────────────────
 export async function deployPosition({
   pool_address,
@@ -474,7 +492,10 @@ export async function deployPosition({
   entry_holders,
 }) {
   pool_address = normalizeMint(pool_address);
-  const activeStrategy = strategy || config.strategy.strategy;
+  // Strategy is resolved after the bin range is final (see pickDeployStrategy below)
+  // so the auto picker can read the actual bins_below of this deploy.
+  let activeStrategy = strategy || null;
+  let strategySource = strategy ? "explicit" : "config";
   let activeBinsBelow = bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow;
   let activeBinsAbove = bins_above ?? 0;
   const parsedVolatility = volatility == null ? null : Number(volatility);
@@ -518,6 +539,15 @@ export async function deployPosition({
 
     activeBinsBelow = Math.max(0, activeBin.binId - lowerBinId);
     activeBinsAbove = Math.max(0, upperBinId - activeBin.binId);
+  }
+
+  if (!activeStrategy) {
+    const picked = pickDeployStrategy(activeBinsBelow);
+    activeStrategy = picked.strategy;
+    strategySource = picked.source;
+    if (picked.source === "auto_picker") {
+      log("deploy", `Strategy picker: bins_below ${activeBinsBelow} vs threshold ${config.strategy.spotBinsThreshold} → ${activeStrategy}`);
+    }
   }
 
   const strategyMap = {
@@ -612,6 +642,7 @@ export async function deployPosition({
       would_deploy: {
         pool_address,
         strategy: activeStrategy,
+        strategy_source: strategySource,
         bins_below: activeBinsBelow,
         bins_above: activeBinsAbove,
         downside_pct: downside_pct ?? null,
@@ -729,6 +760,7 @@ export async function deployPosition({
           pool: pool_address,
           pool_name,
           strategy: activeStrategy,
+          strategy_source: strategySource,
           bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
           bin_step: bin_step ?? actualBinStep,
           base_fee: actualBaseFee,
@@ -790,6 +822,7 @@ export async function deployPosition({
         base_fee: actualBaseFee,
         sw_size_boosted: swSizeBoosted,
         strategy: activeStrategy,
+        strategy_source: strategySource,
         wide_range: isWideRange,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
@@ -874,6 +907,7 @@ export async function deployPosition({
       pool: pool_address,
       pool_name,
       strategy: activeStrategy,
+      strategy_source: strategySource,
       bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
       bin_step: bin_step ?? actualBinStep,
       base_fee: actualBaseFee,
@@ -932,6 +966,7 @@ export async function deployPosition({
       base_fee: actualBaseFee,
       sw_size_boosted: swSizeBoosted,
       strategy: activeStrategy,
+      strategy_source: strategySource,
       wide_range: isWideRange,
       amount_x: finalAmountX,
       amount_y: finalAmountY,
@@ -1711,6 +1746,7 @@ export async function closePosition({ position_address, reason }) {
           pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
           base_mint: closeBaseMint,
           strategy: tracked.strategy,
+          strategy_source: tracked.strategy_source ?? null,
           bin_range: tracked.bin_range,
           bin_step: tracked.bin_step || null,
           base_fee: tracked.base_fee ?? null,
@@ -2018,6 +2054,7 @@ export async function closePosition({ position_address, reason }) {
         pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
         base_mint: closeBaseMint,
         strategy: tracked.strategy,
+        strategy_source: tracked.strategy_source ?? null,
         bin_range: tracked.bin_range,
         bin_step: tracked.bin_step || null,
         base_fee: tracked.base_fee ?? null,

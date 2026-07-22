@@ -239,6 +239,7 @@ function normalizeConfigValue(key, value) {
     "category",
     "discordSignalMode",
     "strategy",
+    "strategyMode",
     "managementModel",
     "screeningModel",
     "generalModel",
@@ -475,6 +476,8 @@ const toolMap = {
       maxSteps: ["llm", "maxSteps"],
       // strategy
       strategy: ["strategy", "strategy"],
+      strategyMode: ["strategy", "strategyMode"],
+      spotBinsThreshold: ["strategy", "spotBinsThreshold"],
       binsBelow: ["strategy", "maxBinsBelow", ["maxBinsBelow"]],
       minBinsBelow: ["strategy", "minBinsBelow"],
       maxBinsBelow: ["strategy", "maxBinsBelow"],

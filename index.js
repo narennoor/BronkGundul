@@ -456,8 +456,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     // Load active strategy
     const activeStrategy = getActiveStrategy();
-    const deployStrategy = config.strategy.strategy;
-    const strategyBlock = `DEPLOY STRATEGY: ${deployStrategy} (from config) | bins_above: 0 (FIXED — never change) | deposit: SOL only (amount_y, amount_x=0)`
+    const autoPicker = String(config.strategy.strategyMode || "fixed").toLowerCase() === "auto";
+    const deployStrategy = autoPicker
+      ? `auto (OMIT the strategy field — the system deterministically picks spot or ${config.strategy.strategy} from the range width)`
+      : `${config.strategy.strategy} (from config)`;
+    const strategyBlock = `DEPLOY STRATEGY: ${deployStrategy} | bins_above: 0 (FIXED — never change) | deposit: SOL only (amount_y, amount_x=0)`
       + (activeStrategy ? `\nSTRATEGY CONTEXT: ${activeStrategy.name} — entry: ${activeStrategy.entry?.condition || "n/a"} | exit: ${activeStrategy.exit?.notes || "n/a"} | best for: ${activeStrategy.best_for}` : "");
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
@@ -1077,7 +1080,7 @@ function formatConfigSnapshot() {
   return [
     "Config snapshot",
     "",
-    `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | default ${config.strategy.defaultBinsBelow}`,
+    `Strategy: ${config.strategy.strategy}${String(config.strategy.strategyMode || "fixed").toLowerCase() === "auto" ? ` | picker: auto (spot < ${config.strategy.spotBinsThreshold} bins)` : ""} | binsBelow: ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | default ${config.strategy.defaultBinsBelow}`,
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
     `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
@@ -1432,7 +1435,8 @@ async function deployLatestCandidate(index) {
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
     amount_y: deployAmount,
-    strategy: config.strategy.strategy,
+    // strategy intentionally omitted — deployPosition resolves it (config default,
+    // or the deterministic picker when strategyMode is "auto")
     bins_below: binsBelow,
     bins_above: 0,
     pool_name: candidate.name,
@@ -1677,7 +1681,7 @@ async function telegramHandler(msg) {
       const { candidate, result, deployAmount, binsBelow } = await deployLatestCandidate(idx);
       const coverage = result.range_coverage
         ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
-        : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
+        : `Strategy: ${result.strategy ?? config.strategy.strategy} | binsBelow: ${binsBelow}`;
       await sendMessage([
         `✅ Deployed ${candidate.name}`,
         `Pool: ${candidate.pool}`,
