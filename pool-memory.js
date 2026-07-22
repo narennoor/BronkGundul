@@ -51,6 +51,11 @@ function isAdjustedWinRateExcludedReason(reason) {
     text.includes("oor");
 }
 
+function isPostCloseReentryCooldownReason(reason) {
+  const text = String(reason || "").trim().toLowerCase();
+  return text.includes("pumped far above") || text.includes("stop loss") || text.includes("trailing");
+}
+
 function isFeeGeneratingDeploy(deploy) {
   const minFeeEarnedPct = Number(config.management.repeatDeployCooldownMinFeeEarnedPct ?? 0);
   const feeEarnedPct = Number(deploy.fee_earned_pct ?? 0);
@@ -212,6 +217,32 @@ export function recordPoolDeploy(poolAddress, deployData) {
       }
       if ((scope === "token" || scope === "both") && entry.base_mint) {
         const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, reason);
+        if (mintCooldownUntil) {
+          log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
+        }
+      }
+    }
+  }
+
+  // Post-close re-entry cooldown — a "pumped far above range", stop-loss, or trailing-TP
+  // close means price just moved violently; re-entering the same token minutes later buys
+  // the retrace (all-time: re-entry <45m after a pumped-above close net -$37 vs +$53 when
+  // waiting; era #3: re-entry after trailing closes net -$77 across 66 re-entries).
+  // OOR/low-yield closes are exempt — fast re-entry after those is net positive.
+  const reentryCooldownMinutes = Math.max(0, Number(config.management.postCloseReentryCooldownMinutes ?? 0));
+  if (reentryCooldownMinutes > 0 && isPostCloseReentryCooldownReason(deploy.close_reason)) {
+    const reason = `post-close re-entry cooldown (${reentryCooldownMinutes}m)`;
+    const hours = reentryCooldownMinutes / 60;
+    const until = new Date(Date.now() + reentryCooldownMinutes * 60 * 1000);
+    // Never shorten a longer cooldown already set by the OOR / repeat-deploy rules above
+    if (!entry.cooldown_until || new Date(entry.cooldown_until) < until) {
+      const poolCooldownUntil = setPoolCooldown(entry, hours, reason);
+      log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
+    }
+    if (entry.base_mint) {
+      const existingMint = Object.values(db).find((e) => e?.base_mint === entry.base_mint && e?.base_mint_cooldown_until);
+      if (!existingMint || new Date(existingMint.base_mint_cooldown_until) < until) {
+        const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, hours, reason);
         if (mintCooldownUntil) {
           log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
         }

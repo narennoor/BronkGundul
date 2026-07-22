@@ -65,6 +65,7 @@
   "outOfRangeWaitMinutes": 30,
   "oorCooldownTriggerCount": 3,
   "oorCooldownHours": 12,
+  "postCloseReentryCooldownMinutes": 45,
   "funnelStatsEnabled": true,
   "funnelShadowEveryNCycles": 12,
   "minVolumeToRebalance": 1000,

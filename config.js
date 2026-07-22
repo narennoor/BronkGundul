@@ -137,6 +137,11 @@ export const config = {
     repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 12,
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
+    // Post-close re-entry cooldown — after a "pumped far above range" or stop-loss close,
+    // block re-entry on the same token for N minutes. Data (54 re-entries after pumped-above
+    // closes, all-time): gap <45m net -$37 WR 57% vs gap >=45m net +$53 WR 62% — re-entering
+    // a token that just pumped/dumped means buying the retrace. 0 disables.
+    postCloseReentryCooldownMinutes: u.postCloseReentryCooldownMinutes ?? 45,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
