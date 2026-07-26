@@ -177,7 +177,7 @@ export async function sendMessage(text) {
 }
 
 // ─── Markdown → Telegram HTML ────────────────────────────────────
-function escapeHtml(text) {
+export function escapeHtml(text) {
   return String(text)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -224,7 +224,15 @@ export async function sendMessageWithButtons(text, inlineKeyboard) {
 
 export async function sendHTML(html) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
+  const text = String(html).slice(0, 4096);
+  const sent = await postTelegram("sendMessage", { text, parse_mode: "HTML" });
+  if (sent) return sent;
+  // Parse failure (unescaped < in dynamic text, etc.) — degrade to plain text
+  // instead of dropping the message entirely.
+  const plain = text
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  return postTelegram("sendMessage", { text: plain });
 }
 
 export async function editMessage(text, messageId) {
