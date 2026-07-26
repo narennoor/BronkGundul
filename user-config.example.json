@@ -31,6 +31,7 @@
   "maxMcap": 10000000,
   "minBinStep": 80,
   "maxBinStep": 125,
+  "minBaseFeePct": 0,
   "minFeeActiveTvlRatio": 0.05,
   "maxFeeActiveTvlRatio": null,
   "minTokenFeesSol": 30,

@@ -85,6 +85,9 @@ export const config = {
     maxMcap:           u.maxMcap           ?? 10_000_000,
     minBinStep:        u.minBinStep        ?? 80,
     maxBinStep:        u.maxBinStep        ?? 125,
+    // Pool base fee floor in percent (discovery `fee_pct`). 0 disables. Era #4
+    // data: base_fee 1% pools net -$121 over 31 closes vs 2% +$44 over 76.
+    minBaseFeePct:     u.minBaseFeePct     ?? 0,
     timeframe:         u.timeframe         ?? "5m",
     category:          u.category          ?? "trending",
     // Funnel kill-count instrumentation (observability only, never changes filtering).
@@ -382,6 +385,7 @@ export function reloadScreeningThresholds() {
     if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
     if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
+    if (fresh.minBaseFeePct  != null) s.minBaseFeePct  = fresh.minBaseFeePct;
     if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;
     if (fresh.category          != null) s.category          = fresh.category;
     if (fresh.minTokenAgeHours  !== undefined) s.minTokenAgeHours = fresh.minTokenAgeHours;

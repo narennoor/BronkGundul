@@ -53,7 +53,8 @@ function isAdjustedWinRateExcludedReason(reason) {
 
 function isPostCloseReentryCooldownReason(reason) {
   const text = String(reason || "").trim().toLowerCase();
-  return text.includes("pumped far above") || text.includes("stop loss") || text.includes("trailing");
+  return text.includes("pumped far above") || text.includes("stop loss") || text.includes("trailing") ||
+    text.includes("take profit");
 }
 
 function isFeeGeneratingDeploy(deploy) {
@@ -225,10 +226,12 @@ export function recordPoolDeploy(poolAddress, deployData) {
     }
   }
 
-  // Post-close re-entry cooldown — a "pumped far above range", stop-loss, or trailing-TP
-  // close means price just moved violently; re-entering the same token minutes later buys
-  // the retrace (all-time: re-entry <45m after a pumped-above close net -$37 vs +$53 when
-  // waiting; era #3: re-entry after trailing closes net -$77 across 66 re-entries).
+  // Post-close re-entry cooldown — a "pumped far above range", stop-loss, trailing-TP,
+  // or take-profit close means price just moved violently; re-entering the same token
+  // minutes later buys the retrace (all-time: re-entry <45m after a pumped-above close
+  // net -$37 vs +$53 when waiting; era #3: re-entry after trailing closes net -$77 across
+  // 66 re-entries; era #4: with a 45m cooldown the damage moved to the 45m-4h window,
+  // -$128 across 53 re-entries, incl. TP-close re-entries which the old rule exempted).
   // OOR/low-yield closes are exempt — fast re-entry after those is net positive.
   const reentryCooldownMinutes = Math.max(0, Number(config.management.postCloseReentryCooldownMinutes ?? 0));
   if (reentryCooldownMinutes > 0 && isPostCloseReentryCooldownReason(deploy.close_reason)) {

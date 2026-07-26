@@ -168,6 +168,12 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (s.maxTvl != null && tvl > s.maxTvl) return `TVL ${tvl} above maxTvl ${s.maxTvl}`;
   if (binStep == null || binStep < s.minBinStep) return `bin_step ${binStep ?? "unknown"} below minBinStep ${s.minBinStep}`;
   if (binStep > s.maxBinStep) return `bin_step ${binStep} above maxBinStep ${s.maxBinStep}`;
+  if (Number(s.minBaseFeePct) > 0) {
+    const baseFeePct = numeric(pool?.fee_pct);
+    if (baseFeePct == null || baseFeePct < Number(s.minBaseFeePct)) {
+      return `base fee ${baseFeePct ?? "unknown"}% below minBaseFeePct ${s.minBaseFeePct}%`;
+    }
+  }
   if (feeActiveTvlRatio == null || feeActiveTvlRatio < s.minFeeActiveTvlRatio) {
     return `fee/active-TVL ${feeActiveTvlRatio ?? "unknown"} below minFeeActiveTvlRatio ${s.minFeeActiveTvlRatio}`;
   }
@@ -1039,6 +1045,8 @@ function shadowThresholdFailures(p, s) {
   const binStep = Number(p.dlmm_params?.bin_step ?? NaN);
   if (Number(s.minBinStep) > 0 && !(binStep >= Number(s.minBinStep))) failures.push("minBinStep");
   if (Number(s.maxBinStep) > 0 && !(binStep <= Number(s.maxBinStep))) failures.push("maxBinStep");
+  const baseFeePct = Number(p.fee_pct ?? NaN);
+  if (Number(s.minBaseFeePct) > 0 && !(baseFeePct >= Number(s.minBaseFeePct))) failures.push("minBaseFeePct");
   const ratio = Number(p.fee_active_tvl_ratio ?? NaN);
   if (Number(s.minFeeActiveTvlRatio) > 0 && !(ratio >= Number(s.minFeeActiveTvlRatio))) failures.push("minFeeActiveTvlRatio");
   if (s.maxFeeActiveTvlRatio != null && Number(s.maxFeeActiveTvlRatio) > 0 && Number.isFinite(ratio) && ratio > Number(s.maxFeeActiveTvlRatio)) failures.push("maxFeeActiveTvlRatio");

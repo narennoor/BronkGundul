@@ -94,6 +94,10 @@ const DEFAULT_STRATEGIES = {
 
 function ensureDefaultStrategies() {
   const db = load();
+  // Auto-activate only on a brand-new library. An operator-cleared active
+  // (active: null with strategies present) must survive boot — re-adding a
+  // missing default entry must not silently re-activate custom_ratio_spot.
+  const isNewLibrary = Object.keys(db.strategies).length === 0;
   let added = false;
   for (const [id, strategy] of Object.entries(DEFAULT_STRATEGIES)) {
     if (!db.strategies[id]) {
@@ -106,7 +110,7 @@ function ensureDefaultStrategies() {
     }
   }
   if (added) {
-    if (!db.active) db.active = "custom_ratio_spot";
+    if (isNewLibrary && !db.active) db.active = "custom_ratio_spot";
     save(db);
     log("strategy", "Preloaded default strategies");
   }
