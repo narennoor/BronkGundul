@@ -243,6 +243,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
           };
           if (!omitToolChoice) reqParams.tool_choice = toolChoice;
+          // MANAGER executes pre-decided actions on live positions — low effort keeps latency down; providers without reasoning_effort drop it silently
+          if (agentType === "MANAGER") reqParams.reasoning_effort = "low";
           response = await client.chat.completions.create(reqParams);
         } catch (error) {
           if (providerMode === "system" && isSystemRoleError(error)) {
