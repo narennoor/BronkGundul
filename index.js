@@ -283,7 +283,10 @@ export async function runManagementCycle({ silent = false } = {}) {
       }
 
       const closeRule = getDeterministicCloseRule(p, config.management);
-      if (closeRule) {
+      // Rule 2 (take profit) is deferred to the fast PnL poller, which requires the
+      // signal to persist (confirmTicks + takeProfitConfirmSec) — this cycle's single
+      // read could act on a price wick that is gone by execution time.
+      if (closeRule && closeRule.rule !== 2) {
         actionMap.set(p.position, closeRule);
         continue;
       }
@@ -786,6 +789,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   // management-interval cooldown gate that used to swallow rule hits).
   const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
   const confirmTicks = Math.max(1, Number(config.pnl.confirmTicks ?? 2));
+  const tpConfirmSec = Math.max(0, Number(config.pnl.takeProfitConfirmSec ?? 15));
   let _pnlPollBusy = false;
   const pnlPollInterval = setInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
@@ -804,8 +808,11 @@ Summarize the current portfolio health, total fees earned, and performance of al
         if (exit) { signal = exit.action; reason = exit.reason; }
         else if (closeRule) { signal = `RULE_${closeRule.rule}`; reason = closeRule.reason; rule = closeRule.rule; }
 
-        // Require N consecutive confirming ticks before acting.
-        const { fire } = registerExitSignal(p.position, signal, confirmTicks);
+        // Require N consecutive confirming ticks before acting. Take profit (RULE_2)
+        // must also persist tpConfirmSec — two ticks 3s apart can both catch the same
+        // price wick; a genuine TP survives the hold, a wick resets the streak.
+        const minSec = signal === "RULE_2" ? tpConfirmSec : 0;
+        const { fire } = registerExitSignal(p.position, signal, confirmTicks, minSec);
         if (!signal || !fire) continue;
 
         log("state", `[PnL poll] ${signal} confirmed (${confirmTicks} ticks): ${p.pair} — ${reason} — closing directly`);

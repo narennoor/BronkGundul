@@ -250,6 +250,12 @@ export const config = {
     // At a 3s poll cadence, 2 ticks ≈ 3-6s — filters single-tick noise without the
     // old fixed 15s setTimeout recheck.
     confirmTicks: Number(u.pnlConfirmTicks ?? 2),
+    // Rule 2 (take profit) additionally requires the signal to PERSIST this many
+    // seconds. Two ticks 3s apart can both read the same price wick during a violent
+    // dump; a genuine TP stays valid for minutes, a wick does not (GMEBULL 21 Jul:
+    // "take profit" close confirmed in 2 ticks, realized -13.57% seventeen seconds
+    // later). 0 disables the extra hold.
+    takeProfitConfirmSec: Number(u.pnlTakeProfitConfirmSec ?? 15),
   },
 
   // ─── Opportunity poller (catches strong pools between screening cycles) ──

@@ -270,9 +270,12 @@ export function confirmPeak(position_address, candidatePnlPct, confirmTicks = 2)
  * tick with the exit action string detected this poll (or null when no exit). An exit
  * only fires after `confirmTicks` consecutive polls report the SAME action — so a single
  * noisy tick can't close a position. Streak resets whenever the signal clears or changes.
+ * `minSeconds` > 0 additionally requires the streak to have PERSISTED that long since
+ * its first tick — consecutive ticks alone can confirm a price wick that both polls
+ * happened to catch (used for take-profit, see config.pnl.takeProfitConfirmSec).
  * Returns { fire, action, count }.
  */
-export function registerExitSignal(position_address, signal, confirmTicks = 2) {
+export function registerExitSignal(position_address, signal, confirmTicks = 2, minSeconds = 0) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return { fire: false, action: null, count: 0 };
@@ -295,7 +298,8 @@ export function registerExitSignal(position_address, signal, confirmTicks = 2) {
   }
 
   const count = pos.pending_exit_count;
-  const fire = count >= confirmTicks;
+  const heldMs = Date.now() - (Date.parse(pos.pending_exit_started_at) || Date.now());
+  const fire = count >= confirmTicks && heldMs >= minSeconds * 1000;
   if (fire) {
     pos.pending_exit_action = null;
     pos.pending_exit_count = 0;
