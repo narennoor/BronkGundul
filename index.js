@@ -29,6 +29,7 @@ import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { evaluateBotFilter } from "./bot-filter.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
@@ -503,11 +504,14 @@ export async function runScreeningCycle({ silent = false } = {}) {
         filteredOut.push({ name: pool.name, reason: `blocked launchpad (${launchpad})` });
         return false;
       }
-      const botPct = ti?.audit?.bot_holders_pct;
-      const maxBotHoldersPct = config.screening.maxBotHoldersPct;
-      if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
-        log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
-        filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
+      const botCheck = evaluateBotFilter({
+        mint: pool.base?.mint,
+        name: pool.name,
+        botPct: ti?.audit?.bot_holders_pct,
+      });
+      if (!botCheck.allowed) {
+        log("screening", `Bot-holder filter: dropped ${pool.name} — ${botCheck.reason}`);
+        filteredOut.push({ name: pool.name, reason: botCheck.reason });
         return false;
       }
       return true;

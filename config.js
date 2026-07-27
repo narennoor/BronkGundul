@@ -112,6 +112,10 @@ export const config = {
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
     blockPvpSymbols:   u.blockPvpSymbols   ?? false, // hard-filter PVP rivals before the LLM sees them
     maxBotHoldersPct:  u.maxBotHoldersPct  ?? 30,  // max bot holder addresses % (Jupiter audit)
+    botFilterReentryPct: u.botFilterReentryPct ?? 25, // hysteresis: once bot-rejected, a mint must dip BELOW this to pass again (0/null = band off)
+    botFilterStrikeCount: u.botFilterStrikeCount ?? 3, // bot rejections within the window that trigger a mint cooldown (0 = strikes off)
+    botFilterStrikeWindowHours: u.botFilterStrikeWindowHours ?? 12, // rolling window for the strike counter
+    botFilterCooldownHours: u.botFilterCooldownHours ?? 6, // mint cooldown once the strike count is hit
     maxTop10Pct:       u.maxTop10Pct       ?? 60,  // max top 10 holders concentration
     loneCandidateMinDegen: u.loneCandidateMinDegen ?? 50, // degen score that lets a SOLO candidate deploy without a narrative
     allowedLaunchpads: u.allowedLaunchpads ?? [],  // allow-list launchpads, [] = no allow-list
@@ -393,6 +397,10 @@ export function reloadScreeningThresholds() {
     if (fresh.avoidPvpSymbols   !== undefined) s.avoidPvpSymbols = fresh.avoidPvpSymbols;
     if (fresh.blockPvpSymbols   !== undefined) s.blockPvpSymbols = fresh.blockPvpSymbols;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
+    if (fresh.botFilterReentryPct !== undefined) s.botFilterReentryPct = fresh.botFilterReentryPct;
+    if (fresh.botFilterStrikeCount != null) s.botFilterStrikeCount = fresh.botFilterStrikeCount;
+    if (fresh.botFilterStrikeWindowHours != null) s.botFilterStrikeWindowHours = fresh.botFilterStrikeWindowHours;
+    if (fresh.botFilterCooldownHours != null) s.botFilterCooldownHours = fresh.botFilterCooldownHours;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
     const minBinsBelow = numericConfig(fresh.minBinsBelow) ?? config.strategy.minBinsBelow;

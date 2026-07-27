@@ -3,6 +3,7 @@ import { isBlacklisted } from "../token-blacklist.js";
 import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
+import { isBotFilterMintOnCooldown } from "../bot-filter.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { getGmgnTrendingTokens, hasGmgnApiKey } from "./gmgn.js";
@@ -888,6 +889,10 @@ export async function getTopCandidates({ limit = 10 } = {}) {
           log("screening", `Filtered cooldown token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
           failures.push("tokenCooldown");
           reasons.push("token cooldown active");
+        } else if (isBotFilterMintOnCooldown(p.base?.mint)) {
+          log("screening", `Filtered bot-filter cooldown token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
+          failures.push("botFilterCooldown");
+          reasons.push("bot-filter strike cooldown active");
         }
       }
       if (failures.length === 0) return true;
