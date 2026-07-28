@@ -114,7 +114,29 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
+  // The fee/TVL gate reads the slow (>=30m) window, same as volatility: a 5m
+  // point-sample flaps between 0 and extreme spikes minutes apart, so candidates
+  // that passed screening on a hot window get blocked on an empty one. Both
+  // readings are logged + persisted for era attribution.
+  const slowTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
+  let slowDetail = detail;
+  if ((config.screening.timeframe || "5m") !== slowTimeframe) {
+    try {
+      slowDetail = await fetchFreshPoolDetail(args.pool_address, slowTimeframe);
+    } catch (error) {
+      return {
+        pass: false,
+        reason: `Could not verify pool ${slowTimeframe} fee/volatility before deploy: ${error.message}`,
+      };
+    }
+  }
+
+  const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(slowDetail);
+  const feeActiveTvlRatioFast = poolDetailFeeActiveTvlRatio(detail);
+  log(
+    "safety",
+    `Deploy fee/TVL gate ${args.pool_address}: ${slowTimeframe}=${feeActiveTvlRatio ?? "unknown"} ${config.screening.timeframe || "5m"}=${feeActiveTvlRatioFast ?? "unknown"}`
+  );
   const minFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
   if (
     minFeeActiveTvlRatio != null &&
@@ -123,7 +145,7 @@ async function validateDeployPoolThresholds(args) {
   ) {
     return {
       pass: false,
-      reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
+      reason: `Pool ${slowTimeframe} fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
     };
   }
   const maxFeeActiveTvlRatio = numberOrNull(config.screening.maxFeeActiveTvlRatio);
@@ -135,28 +157,15 @@ async function validateDeployPoolThresholds(args) {
   ) {
     return {
       pass: false,
-      reason: `Pool fee/active-TVL ${feeActiveTvlRatio}% is above configured maxFeeActiveTvlRatio ${maxFeeActiveTvlRatio}% (peak-degen pool, mean-reversion risk).`,
+      reason: `Pool ${slowTimeframe} fee/active-TVL ${feeActiveTvlRatio}% is above configured maxFeeActiveTvlRatio ${maxFeeActiveTvlRatio}% (peak-degen pool, mean-reversion risk).`,
     };
   }
 
-  const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
-  let volatilityDetail = detail;
-  if ((config.screening.timeframe || "5m") !== volatilityTimeframe) {
-    try {
-      volatilityDetail = await fetchFreshPoolDetail(args.pool_address, volatilityTimeframe);
-    } catch (error) {
-      return {
-        pass: false,
-        reason: `Could not verify pool ${volatilityTimeframe} volatility before deploy: ${error.message}`,
-      };
-    }
-  }
-
-  const volatility = poolDetailVolatility(volatilityDetail);
+  const volatility = poolDetailVolatility(slowDetail);
   if (volatility == null || volatility <= 0) {
     return {
       pass: false,
-      reason: `Pool ${volatilityTimeframe} volatility ${volatility ?? "unknown"} is unusable. Refusing deploy.`,
+      reason: `Pool ${slowTimeframe} volatility ${volatility ?? "unknown"} is unusable. Refusing deploy.`,
     };
   }
 
@@ -182,6 +191,9 @@ async function validateDeployPoolThresholds(args) {
     entry_tvl: tvl,
     entry_volume: numberOrNull(detail?.volume),
     entry_holders: numberOrNull(detail?.base_token_holders ?? detail?.token_x?.holders),
+    entry_fee_tvl_fast: feeActiveTvlRatioFast,
+    entry_fee_tvl_slow: feeActiveTvlRatio,
+    fee_gate_timeframe: slowTimeframe,
   };
 
   return { pass: true, entryMarketData };
