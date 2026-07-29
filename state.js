@@ -76,6 +76,9 @@ export function trackPosition({
   entry_tvl = null,
   entry_volume = null,
   entry_holders = null,
+  entry_fee_tvl_fast = null,
+  entry_fee_tvl_slow = null,
+  fee_gate_timeframe = null,
 }) {
   const state = load();
   state.positions[position] = {
@@ -100,6 +103,9 @@ export function trackPosition({
     entry_tvl,
     entry_volume,
     entry_holders,
+    entry_fee_tvl_fast,
+    entry_fee_tvl_slow,
+    fee_gate_timeframe,
     signal_snapshot: signal_snapshot || null,
     deployed_at: new Date().toISOString(),
     out_of_range_since: null,

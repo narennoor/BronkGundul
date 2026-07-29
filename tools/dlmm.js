@@ -490,6 +490,9 @@ export async function deployPosition({
   entry_tvl,
   entry_volume,
   entry_holders,
+  entry_fee_tvl_fast,
+  entry_fee_tvl_slow,
+  fee_gate_timeframe,
 }) {
   pool_address = normalizeMint(pool_address);
   // Strategy is resolved after the bin range is final (see pickDeployStrategy below)
@@ -777,6 +780,9 @@ export async function deployPosition({
           entry_tvl,
           entry_volume,
           entry_holders,
+          entry_fee_tvl_fast,
+          entry_fee_tvl_slow,
+          fee_gate_timeframe,
         });
       }
 
@@ -924,6 +930,9 @@ export async function deployPosition({
       entry_tvl,
       entry_volume,
       entry_holders,
+      entry_fee_tvl_fast,
+      entry_fee_tvl_slow,
+      fee_gate_timeframe,
     });
 
     appendDecision({
