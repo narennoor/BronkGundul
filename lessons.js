@@ -357,7 +357,7 @@ export function evolveThresholds(perfData, config) {
       const minWinnerFee = Math.min(...winnerFees);
       if (minWinnerFee > current * 1.2) {
         const target  = minWinnerFee * 0.85; // stay slightly below min winner
-        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
+        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.01, 10.0);
         const rounded = Number(newVal.toFixed(2));
         if (rounded > current) {
           changes.minFeeActiveTvlRatio = rounded;
@@ -374,7 +374,7 @@ export function evolveThresholds(perfData, config) {
         const minWinnerFee = Math.min(...winnerFees);
         if (minWinnerFee > maxLoserFee) {
           const target  = maxLoserFee * 1.2;
-          const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
+          const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.01, 10.0);
           const rounded = Number(newVal.toFixed(2));
           if (rounded > current && !changes.minFeeActiveTvlRatio) {
             changes.minFeeActiveTvlRatio = rounded;
