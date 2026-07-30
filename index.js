@@ -10,6 +10,7 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { reconcileClosedPnl } from "./pnl-reconciler.js";
 import { executeTool, registerCronRestarter, sweepLeftoverTokens } from "./tools/executor.js";
 import {
   startPolling,
@@ -93,6 +94,7 @@ function buildPrompt() {
 let _cronTasks = [];
 let _managementBusy = false; // prevents overlapping management cycles
 let _screeningBusy = false;  // prevents overlapping screening cycles
+let _reconcileBusy = false;  // prevents overlapping PnL reconcile runs
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 // Exit/peak confirmation is now done by consecutive-tick counting in state.js
 // (registerExitSignal / confirmPeak), driven by the 3s RPC poller — no setTimeout rechecks.
@@ -786,6 +788,22 @@ Summarize the current portfolio health, total fees earned, and performance of al
     await maybeRunMissedBriefing();
   }, { timezone: 'UTC' });
 
+  // PnL reconcile — the 30s post-close window often catches the Meteora datapi
+  // before the close record settles (booked 0 / placeholder values). Re-fetch
+  // settled records and patch lessons.json + pool-memory. Minutes offset from
+  // the management cadence so the runs never coincide with cycle starts.
+  const reconcileTask = cron.schedule(`7,22,37,52 * * * *`, async () => {
+    if (_reconcileBusy) return;
+    _reconcileBusy = true;
+    try {
+      await reconcileClosedPnl({ lookbackHours: 48 });
+    } catch (e) {
+      log("reconcile_warn", `PnL reconcile failed: ${e.message}`);
+    } finally {
+      _reconcileBusy = false;
+    }
+  });
+
   // Fast PnL poller — the real-time exit path between management cycles, no LLM.
   // Runs on public infra (RPC + Jupiter + Meteora deposits) so it can poll aggressively.
   // Exits require `confirmTicks` consecutive confirming polls (registerExitSignal) so a
@@ -896,7 +914,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }, oppMs);
   }
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
+  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, reconcileTask];
   // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
   _cronTasks._opportunityPollInterval = opportunityPollInterval;
