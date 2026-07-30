@@ -1036,6 +1036,8 @@ export async function getPositionPnl({ pool_address, position_address }) {
       if (p) {
         return {
           pnl_usd: p.pnl_usd,
+          pnl_true_usd: p.pnl_true_usd ?? null,
+          pnl_sol: p.pnl_sol ?? null,
           pnl_pct: p.pnl_pct,
           current_value_usd: p.total_value_usd,
           unclaimed_fee_usd: p.unclaimed_fees_usd,
@@ -1070,6 +1072,8 @@ export async function getPositionPnl({ pool_address, position_address }) {
     const derivedPnlPct = deriveOpenPnlPct(p, solMode);
     return {
       pnl_usd:           roundNum(solMode ? p.pnlSol : p.pnlUsd, 4),
+      pnl_true_usd:      roundNum(p.pnlUsd, 4),
+      pnl_sol:           roundNum(p.pnlSol, 4),
       pnl_pct:           roundNum(reportedPnlPct ?? derivedPnlPct ?? 0, 2),
       current_value_usd: roundNum(currentValue, 4),
       unclaimed_fee_usd: roundNum(unclaimedValue, 4),
@@ -1391,6 +1395,12 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
             : binData
             ? Math.round(parseFloat(binData.pnlUsd || 0) * 10000) / 10000
             : null,
+          // Always-SOL counterpart so bookkeeping stays dual-denominated regardless of solMode.
+          pnl_sol:            lpData
+            ? Math.round(safeNum(lpData.pnl?.valueNative) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(binData.pnlSol || 0) * 10000) / 10000
+            : null,
           pnl_pct:            (lpData || binData)
             ? Math.round(reportedPnlPct * 100) / 100
             : null,
@@ -1494,6 +1504,8 @@ export async function getWalletPositions({ wallet_address }) {
         unclaimed_fees_usd: roundNum(unclaimedValue, 4),
         total_value_usd:    roundNum(currentValue, 4),
         pnl_usd:            roundNum(p ? (solMode ? p.pnlSol : p.pnlUsd) : 0, 4),
+        pnl_true_usd:       roundNum(p ? p.pnlUsd : 0, 4),
+        pnl_sol:            roundNum(p ? p.pnlSol : 0, 4),
         pnl_pct:            roundNum(reportedPnlPct ?? derivedPnlPct ?? 0, 2),
         age_minutes:        p?.createdAt ? Math.floor((Date.now() - p.createdAt * 1000) / 60000) : null,
       };
@@ -1701,6 +1713,7 @@ export async function closePosition({ position_address, reason }) {
 
         let pnlUsd = 0;
         let pnlTrueUsd = 0;
+        let pnlSol = 0;
         let pnlPct = 0;
         let finalValueUsd = 0;
         let initialUsd = 0;
@@ -1714,7 +1727,8 @@ export async function closePosition({ position_address, reason }) {
               const posEntry = (data.positions || []).find((entry) => entry.positionAddress === position_address);
               if (posEntry) {
                 pnlTrueUsd = safeNum(posEntry.pnlUsd);
-                pnlUsd = config.management.solMode ? getClosedPnlValue(posEntry, true) : pnlTrueUsd;
+                pnlSol = getClosedPnlValue(posEntry, true);
+                pnlUsd = config.management.solMode ? pnlSol : pnlTrueUsd;
                 pnlPct = getClosedPnlPct(posEntry, config.management.solMode);
                 finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
                 initialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
@@ -1767,6 +1781,7 @@ export async function closePosition({ position_address, reason }) {
           fees_earned_usd: feesUsd,
           final_value_usd: finalValueUsd,
           initial_value_usd: initialUsd,
+          pnl_sol: Math.round(pnlSol * 10000) / 10000,
           minutes_in_range: minutesHeld - minutesOOR,
           minutes_held: minutesHeld,
           close_reason: reason || "agent decision",
@@ -1792,6 +1807,8 @@ export async function closePosition({ position_address, reason }) {
           ].filter(Boolean),
           metrics: {
             pnl_usd: pnlUsd,
+            pnl_true_usd: pnlTrueUsd,
+            pnl_sol: pnlSol,
             pnl_pct: pnlPct,
             fees_usd: feesUsd,
             minutes_held: minutesHeld,
@@ -1809,6 +1826,8 @@ export async function closePosition({ position_address, reason }) {
           close_txs: closeTxHashes,
           txs: txHashes,
           pnl_usd: pnlUsd,
+          pnl_true_usd: pnlTrueUsd,
+          pnl_sol: pnlSol,
           pnl_pct: pnlPct,
           base_mint: closeBaseMint,
         };
@@ -1976,6 +1995,7 @@ export async function closePosition({ position_address, reason }) {
       // Fetch closed PnL from API — authoritative source after withdrawal settles
       let pnlUsd = 0;
       let pnlTrueUsd = 0;
+      let pnlSol = 0;
       let pnlPct = 0;
       let finalValueUsd = 0;
       let initialUsd = 0;
@@ -1989,7 +2009,8 @@ export async function closePosition({ position_address, reason }) {
             const posEntry = (data.positions || []).find(p => p.positionAddress === position_address);
             if (posEntry) {
               const nextPnlUsd = safeNum(posEntry.pnlUsd);
-              const nextPnlValue = config.management.solMode ? getClosedPnlValue(posEntry, true) : nextPnlUsd;
+              const nextPnlSol = getClosedPnlValue(posEntry, true);
+              const nextPnlValue = config.management.solMode ? nextPnlSol : nextPnlUsd;
               const nextPnlPct = getClosedPnlPct(posEntry, config.management.solMode);
               const nextFinalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
               const nextInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
@@ -1999,12 +2020,13 @@ export async function closePosition({ position_address, reason }) {
                 log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`);
               } else {
                 pnlTrueUsd    = nextPnlUsd;
+                pnlSol        = nextPnlSol;
                 pnlUsd        = nextPnlValue;
                 pnlPct        = nextPnlPct;
                 finalValueUsd = nextFinalValueUsd;
                 initialUsd    = nextInitialUsd;
                 feesUsd       = nextFeesUsd;
-                log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(2)} ${config.management.solMode ? "SOL" : "USD"} (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)} USD, deposited=${initialUsd.toFixed(2)} USD`);
+                log("close", `Closed PnL from API: pnl=${pnlTrueUsd.toFixed(2)} USD / ${pnlSol.toFixed(4)} SOL (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)} USD, deposited=${initialUsd.toFixed(2)} USD`);
                 break;
               }
             } else {
@@ -2021,6 +2043,7 @@ export async function closePosition({ position_address, reason }) {
         const cachedPos = _positionsCache?.positions?.find(p => p.position === position_address);
         if (cachedPos) {
           pnlTrueUsd    = cachedPos.pnl_true_usd ?? (config.management.solMode ? 0 : cachedPos.pnl_usd) ?? 0;
+          pnlSol        = cachedPos.pnl_sol ?? (config.management.solMode ? (cachedPos.pnl_usd ?? 0) : 0);
           pnlUsd        = config.management.solMode ? (cachedPos.pnl_usd ?? 0) : pnlTrueUsd;
           pnlPct        = cachedPos.pnl_pct   ?? 0;
           feesUsd       = (cachedPos.collected_fees_true_usd || 0) + (cachedPos.unclaimed_fees_true_usd || 0);
@@ -2075,6 +2098,7 @@ export async function closePosition({ position_address, reason }) {
         fees_earned_usd: feesUsd,
         final_value_usd: finalValueUsd,
         initial_value_usd: initialUsd,
+        pnl_sol: Math.round(pnlSol * 10000) / 10000,
         minutes_in_range: minutesHeld - minutesOOR,
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
@@ -2100,6 +2124,8 @@ export async function closePosition({ position_address, reason }) {
         ].filter(Boolean),
         metrics: {
           pnl_usd: pnlUsd,
+          pnl_true_usd: pnlTrueUsd,
+          pnl_sol: pnlSol,
           pnl_pct: pnlPct,
           fees_usd: feesUsd,
           minutes_held: minutesHeld,
@@ -2115,6 +2141,8 @@ export async function closePosition({ position_address, reason }) {
         close_txs: closeTxHashes,
         txs: txHashes,
         pnl_usd: pnlUsd,
+        pnl_true_usd: pnlTrueUsd,
+        pnl_sol: pnlSol,
         pnl_pct: pnlPct,
         base_mint: closeBaseMint,
       };
