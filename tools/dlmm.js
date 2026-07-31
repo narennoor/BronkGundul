@@ -1595,6 +1595,24 @@ export async function closePosition({ position_address, reason }) {
   }
 
   const tracked = getTrackedPosition(position_address);
+  // Exit-slippage instrumentation (step 1): timestamps for each close stage so the
+  // close→swap latency can be decomposed at review time. Observability only.
+  const closeSignalAtMs = Date.now();
+  let claimDoneAtMs = null;
+  let closeTxDoneAtMs = null;
+  // settle_ms covers everything between close-tx confirm and this function returning
+  // (5s RPC sleep + close verification + closed-PnL polling) — the auto-swap in
+  // executor.js only starts after that, so this is the hidden part of close→swap latency.
+  const buildCloseTiming = () => ({
+    signal_at: new Date(closeSignalAtMs).toISOString(),
+    claim_done_at: claimDoneAtMs ? new Date(claimDoneAtMs).toISOString() : null,
+    close_done_at: closeTxDoneAtMs ? new Date(closeTxDoneAtMs).toISOString() : null,
+    returned_at: new Date().toISOString(),
+    claim_ms: claimDoneAtMs ? claimDoneAtMs - closeSignalAtMs : null,
+    close_ms: closeTxDoneAtMs ? closeTxDoneAtMs - (claimDoneAtMs ?? closeSignalAtMs) : null,
+    settle_ms: closeTxDoneAtMs ? Date.now() - closeTxDoneAtMs : null,
+    total_ms: Date.now() - closeSignalAtMs,
+  });
 
   try {
     log("close", `Closing position: ${position_address}`);
@@ -1890,6 +1908,7 @@ export async function closePosition({ position_address, reason }) {
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
         }
       }
+      claimDoneAtMs = Date.now();
     } catch (e) {
       log("close_warn", `Step 1 (Claim) failed or nothing to claim: ${e.message}`);
     }
@@ -1935,6 +1954,7 @@ export async function closePosition({ position_address, reason }) {
       const txHash = await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
       closeTxHashes.push(txHash);
     }
+    closeTxDoneAtMs = Date.now();
     const txHashes = [...claimTxHashes, ...closeTxHashes];
     log("close", `Step 2 OK (close only): ${closeTxHashes.join(", ") || "none"}`);
     log("close", `SUCCESS txs: ${txHashes.join(", ")}`);
@@ -2145,6 +2165,7 @@ export async function closePosition({ position_address, reason }) {
         pnl_sol: pnlSol,
         pnl_pct: pnlPct,
         base_mint: closeBaseMint,
+        close_timing: buildCloseTiming(),
       };
     }
 
@@ -2168,6 +2189,7 @@ export async function closePosition({ position_address, reason }) {
       close_txs: closeTxHashes,
       txs: txHashes,
       base_mint: pool.lbPair.tokenXMint.toString(),
+      close_timing: buildCloseTiming(),
     };
   } catch (error) {
     log("close_error", error.message);

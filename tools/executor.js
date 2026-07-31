@@ -11,7 +11,7 @@ import {
 } from "./dlmm.js";
 import { getWalletBalances, swapToken, normalizeMint } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
-import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
+import { addLesson, attachExitExecution, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
 import { setPositionInstruction } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
@@ -824,12 +824,47 @@ export async function executeTool(name, args) {
         }
         // Auto-swap base token back to SOL unless user said to hold (retried).
         if (!args.skip_swap && result.base_mint) {
-          const { swapped, result: swapResult } = await swapBaseToSolWithRetry(result.base_mint, "after close");
+          const { swapped, result: swapResult, token } = await swapBaseToSolWithRetry(result.base_mint, "after close");
           if (swapped) {
             // Tell the model the swap already happened so it doesn't call swap_token again
             result.auto_swapped = true;
             result.auto_swap_note = `Base token already auto-swapped back to SOL (${result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
             if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+          }
+          // Exit-slippage instrumentation (step 1): merge swap-side execution data into
+          // the performance entry recordPerformance wrote inside closePosition. The swap
+          // runs after that record exists, so this back-fills `exit_execution`.
+          try {
+            const posAddr = result.position || args.position_address;
+            if (posAddr) {
+              const t = result.close_timing || {};
+              const quoteOutSol = swapResult?.quote_out_amount != null ? Number(swapResult.quote_out_amount) / 1e9 : null;
+              const execOutSol = swapResult?.amount_out != null ? Number(swapResult.amount_out) / 1e9 : null;
+              const msBetween = (a, b) => (a && b) ? new Date(b).getTime() - new Date(a).getTime() : null;
+              attachExitExecution(posAddr, {
+                ...t,
+                swap_quoted_at: swapResult?.quoted_at ?? null,
+                swap_executed_at: swapResult?.executed_at ?? null,
+                close_to_quote_ms: msBetween(t.close_done_at, swapResult?.quoted_at),
+                signal_to_swap_done_ms: msBetween(t.signal_at, swapResult?.executed_at),
+                token_amount: token?.balance ?? null,
+                token_usd_at_swap: token?.usd ?? null,
+                quote_price_impact_pct: swapResult?.quote_price_impact_pct ?? null,
+                quote_slippage_bps: swapResult?.quote_slippage_bps ?? null,
+                quote_in_usd: swapResult?.quote_in_usd ?? null,
+                quote_out_usd: swapResult?.quote_out_usd ?? null,
+                quote_out_sol: quoteOutSol,
+                exec_out_sol: execOutSol,
+                exec_vs_quote_pct: (quoteOutSol && execOutSol != null)
+                  ? Math.round(((execOutSol - quoteOutSol) / quoteOutSol) * 10000) / 100
+                  : null,
+                swap_tx: swapResult?.tx ?? null,
+                swap_attempted: !!swapResult,
+                swap_success: !!swapped,
+              });
+            }
+          } catch (e) {
+            log("executor_warn", `Exit-exec instrumentation failed: ${e.message}`);
           }
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {

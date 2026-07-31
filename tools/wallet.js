@@ -186,6 +186,7 @@ export async function swapToken({
     const orderUrl = `${JUPITER_SWAP_V2_API}/order?${search.toString()}`;
     const jupiterApiKey = getJupiterApiKey();
 
+    const quotedAtMs = Date.now();
     const orderRes = await fetch(orderUrl, {
       headers: jupiterApiKey ? { "x-api-key": jupiterApiKey } : {},
     });
@@ -200,6 +201,10 @@ export async function swapToken({
     }
 
     const { transaction: unsignedTx, requestId } = order;
+    const orderLatencyMs = Date.now() - quotedAtMs;
+    if (order.priceImpactPct != null || order.outAmount != null) {
+      log("swap", `Quote: out=${order.outAmount ?? "?"} impact=${order.priceImpactPct ?? "?"}% slippage=${order.slippageBps ?? "?"}bps (order ${orderLatencyMs}ms)`);
+    }
 
     // ─── Deserialize and sign ─────────────────────────────────
     const tx = VersionedTransaction.deserialize(Buffer.from(unsignedTx, "base64"));
@@ -220,6 +225,7 @@ export async function swapToken({
     }
 
     const result = await execRes.json();
+    const executedAtMs = Date.now();
     if (result.status === "Failed") {
       throw new Error(`Swap failed on-chain: code=${result.code}`);
     }
@@ -243,6 +249,18 @@ export async function swapToken({
       referral_fee_bps_requested: referralParams?.referralFee || 0,
       fee_bps_applied: order.feeBps ?? null,
       fee_mint: order.feeMint ?? null,
+      // Exit-slippage instrumentation: quote-side fields Jupiter already returns
+      // but were previously discarded. Raw units (lamports/smallest unit).
+      quote_in_amount: order.inAmount ?? null,
+      quote_out_amount: order.outAmount ?? null,
+      quote_price_impact_pct: order.priceImpactPct != null ? Number(order.priceImpactPct) : null,
+      quote_slippage_bps: order.slippageBps ?? null,
+      quote_in_usd: order.inUsdValue ?? null,
+      quote_out_usd: order.outUsdValue ?? null,
+      quoted_at: new Date(quotedAtMs).toISOString(),
+      executed_at: new Date(executedAtMs).toISOString(),
+      order_latency_ms: orderLatencyMs,
+      execute_latency_ms: executedAtMs - quotedAtMs - orderLatencyMs,
     };
   } catch (error) {
     log("swap_error", error.message);

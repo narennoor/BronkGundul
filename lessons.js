@@ -215,6 +215,32 @@ export async function recordPerformance(perf) {
 }
 
 /**
+ * Attach exit-execution instrumentation to an already-recorded performance
+ * entry. Called by the executor after the post-close auto-swap finishes —
+ * recordPerformance runs inside closePosition, before the swap exists, so the
+ * swap-side data (quote impact, quoted vs executed out, stage latencies) has
+ * to be merged in afterwards. Pure observability: nothing reads
+ * `exit_execution` for lessons, evolve, or weights.
+ *
+ * @param {string} positionAddress
+ * @param {Object} exec - see executor.js close_position post-effect for shape
+ * @returns {boolean} true if an entry was found and updated
+ */
+export function attachExitExecution(positionAddress, exec) {
+  if (!positionAddress || !exec) return false;
+  const data = load();
+  for (let i = data.performance.length - 1; i >= 0; i--) {
+    if (data.performance[i].position === positionAddress) {
+      data.performance[i].exit_execution = exec;
+      save(data);
+      return true;
+    }
+  }
+  log("lessons_warn", `attachExitExecution: no performance entry found for ${positionAddress.slice(0, 8)}`);
+  return false;
+}
+
+/**
  * Derive a lesson from a closed position's performance.
  * Only generates a lesson if the outcome was clearly good or bad.
  */
