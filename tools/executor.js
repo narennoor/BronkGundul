@@ -8,6 +8,7 @@ import {
   claimFees,
   closePosition,
   searchPools,
+  waitForCloseBookkeeping,
 } from "./dlmm.js";
 import { getWalletBalances, swapToken, normalizeMint } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
@@ -685,8 +686,16 @@ async function swapBaseToSolWithRetry(baseMint, label) {
       const balances = await getWalletBalances({});
       const token = balances.tokens?.find((t) => t.mint === baseMint);
       if (!token || token.usd < 0.10) {
-        // Nothing left to swap (already sold or dust) — treat as done.
-        return { swapped: attempt > 1, result: null, token: null };
+        // Balance APIs can lag behind the close tx (step-2-light shortened the
+        // post-close delay) — only conclude "nothing to swap" on the LAST
+        // attempt, so a real bag that just isn't indexed yet still gets sold.
+        // Genuine full-SOL exits simply spend the retries quietly.
+        if (attempt >= attempts) {
+          return { swapped: attempt > 1, result: null, token: null };
+        }
+        lastErr = "base token not yet visible in balances (or dust)";
+        await sleep(delayMs);
+        continue;
       }
       log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})`);
       const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
@@ -837,6 +846,9 @@ export async function executeTool(name, args) {
           try {
             const posAddr = result.position || args.position_address;
             if (posAddr) {
+              // Step-2-light: recordPerformance now runs async inside closePosition —
+              // wait for it so the performance entry exists before attaching.
+              await waitForCloseBookkeeping(posAddr);
               const t = result.close_timing || {};
               const quoteOutSol = swapResult?.quote_out_amount != null ? Number(swapResult.quote_out_amount) / 1e9 : null;
               const execOutSol = swapResult?.amount_out != null ? Number(swapResult.amount_out) / 1e9 : null;

@@ -1588,6 +1588,18 @@ export async function claimFees({ position_address }) {
 }
 
 // ─── Close Position ────────────────────────────────────────────
+// Step-2-light (exit-slippage): closed-PnL settling + recordPerformance run
+// asynchronously after closePosition returns, so the post-close auto-swap in
+// executor.js starts without waiting behind the polling (median ~1s, tail ~25s).
+// The executor awaits this before attaching exit-execution instrumentation.
+const _pendingCloseBookkeeping = new Map();
+
+export async function waitForCloseBookkeeping(position_address, timeoutMs = 60_000) {
+  const pending = _pendingCloseBookkeeping.get(position_address);
+  if (!pending) return;
+  await Promise.race([pending, new Promise((r) => setTimeout(r, timeoutMs))]);
+}
+
 export async function closePosition({ position_address, reason }) {
   position_address = normalizeMint(position_address);
   if (process.env.DRY_RUN === "true") {
@@ -1601,8 +1613,9 @@ export async function closePosition({ position_address, reason }) {
   let claimDoneAtMs = null;
   let closeTxDoneAtMs = null;
   // settle_ms covers everything between close-tx confirm and this function returning
-  // (5s RPC sleep + close verification + closed-PnL polling) — the auto-swap in
-  // executor.js only starts after that, so this is the hidden part of close→swap latency.
+  // (5s RPC sleep + close verification). Since step-2-light the closed-PnL polling
+  // is async and NO LONGER inside this window — its duration is recorded separately
+  // as pnl_settle_ms on the performance entry.
   const buildCloseTiming = () => ({
     signal_at: new Date(closeSignalAtMs).toISOString(),
     claim_done_at: claimDoneAtMs ? new Date(claimDoneAtMs).toISOString() : null,
@@ -1884,6 +1897,12 @@ export async function closePosition({ position_address, reason }) {
     poolCache.delete(poolAddress.toString());
     const pool = await getPool(poolAddress);
 
+    // Snapshot the position from the last cached read BEFORE the close txs —
+    // used for the provisional PnL in the return value and as the bookkeeping
+    // fallback (after close verification refreshes the cache, the closed
+    // position is gone from it).
+    const preCloseSnap = _positionsCache?.positions?.find((p) => p.position === position_address) || null;
+
     const positionPubKey = new PublicKey(position_address);
     const claimTxHashes = [];
     const closeTxHashes = [];
@@ -2003,6 +2022,22 @@ export async function closePosition({ position_address, reason }) {
         minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
       }
 
+      const closeBaseMint = pool.lbPair.tokenXMint.toString();
+
+      // Provisional PnL for the immediate return value — from the pre-close
+      // cached snapshot. The settled numbers are fetched in the async block
+      // below (step-2-light): the post-close auto-swap in executor.js no longer
+      // waits behind the closed-PnL polling. lessons.json still gets the
+      // authoritative numbers; the reconciler patches any stragglers.
+      const solMode = config.management.solMode;
+      const provTrueUsd = preCloseSnap ? (preCloseSnap.pnl_true_usd ?? (solMode ? 0 : preCloseSnap.pnl_usd) ?? 0) : 0;
+      const provSol     = preCloseSnap ? (preCloseSnap.pnl_sol ?? (solMode ? (preCloseSnap.pnl_usd ?? 0) : 0)) : 0;
+      const provUsd     = solMode ? (preCloseSnap?.pnl_usd ?? 0) : provTrueUsd;
+      const provPct     = preCloseSnap?.pnl_pct ?? 0;
+
+      // Async bookkeeping: settled-PnL fetch → recordPerformance → decision log.
+      // Body keeps its original indentation — it was inline before step-2-light.
+      const bookkeeping = (async () => {
       const shouldRejectClosedPnl = (pct, closeReasonText) => {
         if (!Number.isFinite(pct)) return false;
         const reasonText = String(closeReasonText || "").toLowerCase();
@@ -2020,6 +2055,7 @@ export async function closePosition({ position_address, reason }) {
       let finalValueUsd = 0;
       let initialUsd = 0;
       let feesUsd = tracked.total_fees_claimed_usd || 0;
+      const pnlSettleStartMs = Date.now();
       try {
         const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
         for (let attempt = 0; attempt < 6; attempt++) {
@@ -2058,9 +2094,10 @@ export async function closePosition({ position_address, reason }) {
       } catch (e) {
         log("close_warn", `Closed PnL fetch failed: ${e.message}`);
       }
+      const pnlSettleMs = Date.now() - pnlSettleStartMs;
       // Fallback to pre-close cache snapshot if closed API had no data
       if (finalValueUsd === 0) {
-        const cachedPos = _positionsCache?.positions?.find(p => p.position === position_address);
+        const cachedPos = preCloseSnap;
         if (cachedPos) {
           pnlTrueUsd    = cachedPos.pnl_true_usd ?? (config.management.solMode ? 0 : cachedPos.pnl_usd) ?? 0;
           pnlSol        = cachedPos.pnl_sol ?? (config.management.solMode ? (cachedPos.pnl_usd ?? 0) : 0);
@@ -2080,7 +2117,6 @@ export async function closePosition({ position_address, reason }) {
         }
       }
 
-      const closeBaseMint = pool.lbPair.tokenXMint.toString();
       const signalSnapshot = resolvePerformanceSignalSnapshot({
         poolAddress,
         baseMint: closeBaseMint,
@@ -2127,6 +2163,7 @@ export async function closePosition({ position_address, reason }) {
         entry_tvl: tracked.entry_tvl ?? null,
         entry_volume: tracked.entry_volume ?? null,
         entry_holders: tracked.entry_holders ?? null,
+        pnl_settle_ms: pnlSettleMs,
         ...exitMarket,
       });
 
@@ -2151,6 +2188,13 @@ export async function closePosition({ position_address, reason }) {
           minutes_held: minutesHeld,
         },
       });
+      })().catch((e) => {
+        log("close_warn", `Async close bookkeeping failed for ${position_address.slice(0, 8)}: ${e.message}`);
+      });
+      _pendingCloseBookkeeping.set(position_address, bookkeeping);
+      bookkeeping.finally(() => {
+        setTimeout(() => _pendingCloseBookkeeping.delete(position_address), 60_000);
+      });
 
       return {
         success: true,
@@ -2160,10 +2204,11 @@ export async function closePosition({ position_address, reason }) {
         claim_txs: claimTxHashes,
         close_txs: closeTxHashes,
         txs: txHashes,
-        pnl_usd: pnlUsd,
-        pnl_true_usd: pnlTrueUsd,
-        pnl_sol: pnlSol,
-        pnl_pct: pnlPct,
+        pnl_usd: provUsd,
+        pnl_true_usd: provTrueUsd,
+        pnl_sol: provSol,
+        pnl_pct: provPct,
+        pnl_provisional: true,
         base_mint: closeBaseMint,
         close_timing: buildCloseTiming(),
       };
