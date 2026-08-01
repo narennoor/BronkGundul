@@ -681,6 +681,7 @@ async function swapBaseToSolWithRetry(baseMint, label) {
   const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
   const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
   let lastErr = null;
+  let swapTried = false; // an actual swapToken call happened (balance may then legitimately empty)
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const balances = await getWalletBalances({});
@@ -689,14 +690,16 @@ async function swapBaseToSolWithRetry(baseMint, label) {
         // Balance APIs can lag behind the close tx (step-2-light shortened the
         // post-close delay) — only conclude "nothing to swap" on the LAST
         // attempt, so a real bag that just isn't indexed yet still gets sold.
-        // Genuine full-SOL exits simply spend the retries quietly.
+        // Genuine full-SOL exits simply spend the retries quietly. swapped is
+        // only true if an earlier attempt really fired a swap (partial fill).
         if (attempt >= attempts) {
-          return { swapped: attempt > 1, result: null, token: null };
+          return { swapped: swapTried, result: null, token: null };
         }
         lastErr = "base token not yet visible in balances (or dust)";
         await sleep(delayMs);
         continue;
       }
+      swapTried = true;
       log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})`);
       const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
       const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
