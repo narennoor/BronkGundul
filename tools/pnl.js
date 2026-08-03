@@ -115,8 +115,17 @@ async function getLatestSig(conn, addr) {
   }
 }
 
+const hasDeposits = (d) =>
+  safeNum(d?.allTimeDeposits?.total?.usd) > 0 || safeNum(d?.allTimeDeposits?.total?.sol) > 0;
+
 async function getMeteoraData(conn, walletAddress, flat) {
   const ttlMs = Math.max(0, Number(config.pnl.depositCacheTtlSec ?? 300)) * 1000;
+  // A fresh deploy isn't indexed by the datapi for a minute or two, so its
+  // first response has zero deposits. Caching that for the full TTL keeps
+  // pnl_pct_suspicious=true (STOP_LOSS/TRAILING_TP suppressed) for up to
+  // depositCacheTtlSec — right in the post-deploy dump window. Entries with
+  // incomplete deposits retry on this much shorter TTL instead.
+  const retryTtlMs = Math.min(ttlMs, Math.max(0, Number(config.pnl.depositRetryTtlSec ?? 15)) * 1000);
   const positionsByPool = new Map();
   for (const f of flat) {
     if (!positionsByPool.has(f.pool)) positionsByPool.set(f.pool, []);
@@ -129,7 +138,7 @@ async function getMeteoraData(conn, walletAddress, flat) {
     const sigByPosition = {};
     await Promise.all(positionAddrs.map(async (addr) => { sigByPosition[addr] = await getLatestSig(conn, addr); }));
 
-    const ageOk = cached && Date.now() - cached.at < ttlMs;
+    const ageOk = cached && Date.now() - cached.at < (cached.depositsIncomplete ? retryTtlMs : ttlMs);
     const sigsMatch = cached && positionAddrs.every((a) => cached.sigByPosition?.[a] === sigByPosition[a]);
 
     let data;
@@ -142,8 +151,6 @@ async function getMeteoraData(conn, walletAddress, flat) {
       // it instead of caching the bad response, which would suppress
       // STOP_LOSS/TRAILING_TP (suspicious ticks) for a full TTL window.
       if (cached?.byPosition) {
-        const hasDeposits = (d) =>
-          safeNum(d?.allTimeDeposits?.total?.usd) > 0 || safeNum(d?.allTimeDeposits?.total?.sol) > 0;
         for (const addr of positionAddrs) {
           const prev = cached.byPosition[addr];
           if (prev && hasDeposits(prev) && !hasDeposits(data[addr])) {
@@ -152,7 +159,8 @@ async function getMeteoraData(conn, walletAddress, flat) {
           }
         }
       }
-      _meteoraCache.set(pool, { at: Date.now(), byPosition: data, sigByPosition });
+      const depositsIncomplete = positionAddrs.some((addr) => !hasDeposits(data[addr]));
+      _meteoraCache.set(pool, { at: Date.now(), byPosition: data, sigByPosition, depositsIncomplete });
     }
     for (const addr of positionAddrs) byPosition[addr] = data[addr] || null;
   }));

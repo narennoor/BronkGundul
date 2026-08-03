@@ -253,6 +253,11 @@ export const config = {
     source: nonEmptyString(u.pnlSource, "rpc"), // rpc | meteora (fallback-only)
     pollIntervalSec: Number(u.pnlPollIntervalSec ?? 3),
     depositCacheTtlSec: Number(u.pnlDepositCacheTtlSec ?? 300),
+    // Short retry TTL used instead of depositCacheTtlSec while a pool's cached
+    // datapi response is missing deposits for any tracked position (fresh
+    // deploy not yet indexed) — shrinks the post-deploy window where
+    // pnl_pct_suspicious suppresses STOP_LOSS/TRAILING_TP.
+    depositRetryTtlSec: Number(u.pnlDepositRetryTtlSec ?? 15),
     // Consecutive confirming polls required before a peak is raised or an exit fires.
     // At a 3s poll cadence, 2 ticks ≈ 3-6s — filters single-tick noise without the
     // old fixed 15s setTimeout recheck.
