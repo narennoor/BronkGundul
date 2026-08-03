@@ -1829,6 +1829,12 @@ export async function closePosition({ position_address, reason }) {
           entry_tvl: tracked.entry_tvl ?? null,
           entry_volume: tracked.entry_volume ?? null,
           entry_holders: tracked.entry_holders ?? null,
+          // Dual-log of the fee/TVL gate: fast = the 5m sample, slow = the 30m
+          // window the gate actually reads. Kept on the performance entry so
+          // window attribution needs lessons.json alone, no state.json join.
+          entry_fee_tvl_fast: tracked.entry_fee_tvl_fast ?? null,
+          entry_fee_tvl_slow: tracked.entry_fee_tvl_slow ?? null,
+          fee_gate_timeframe: tracked.fee_gate_timeframe ?? null,
           ...exitMarket,
         });
 
@@ -2186,6 +2192,12 @@ export async function closePosition({ position_address, reason }) {
         entry_tvl: tracked.entry_tvl ?? null,
         entry_volume: tracked.entry_volume ?? null,
         entry_holders: tracked.entry_holders ?? null,
+        // Dual-log of the fee/TVL gate: fast = the 5m sample, slow = the 30m
+        // window the gate actually reads. Kept on the performance entry so
+        // window attribution needs lessons.json alone, no state.json join.
+        entry_fee_tvl_fast: tracked.entry_fee_tvl_fast ?? null,
+        entry_fee_tvl_slow: tracked.entry_fee_tvl_slow ?? null,
+        fee_gate_timeframe: tracked.fee_gate_timeframe ?? null,
         pnl_settle_ms: pnlSettleMs,
         ...exitMarket,
       });
