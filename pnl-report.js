@@ -92,28 +92,49 @@ export async function computePnlReport() {
 
   const wallet = Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY)).publicKey.toString();
 
+  // ── on-chain flows + local state, sampled as one atomic pass ──
+  // `balance`, `state.json` and `lessons.json` MUST describe the same instant.
+  // The report runs for 60-90s (Helius paging), and a close landing inside
+  // that span used to be counted twice — once as locked capital from the
+  // stale state read, once as SOL already back in the freshly-read balance.
+  // On 3 Aug 2026 that inflated equity by 3.71 SOL and ROI by 15pp, with no
+  // warning shown. Guard: read the JSON files right next to the balance, then
+  // re-read the balance; if anything moved, redo the pass.
+  let txs, balance, flowSum, perf, statePositions, consistent = false;
+  for (let attempt = 0; attempt < 3 && !consistent; attempt++) {
+    txs = await fetchAllTxs(wallet, process.env.HELIUS_API_KEY);
+    balance = await fetchBalance(wallet);
+    perf = readJson("lessons.json", {}).performance || [];
+    statePositions = Object.values(readJson("state.json", {}).positions || {});
+    const balanceAfterReads = await fetchBalance(wallet);
+    flowSum = txs.reduce((s, t) => s + walletChange(t, wallet), 0);
+    consistent = Math.abs(flowSum - balance) < 1e-6 && balance === balanceAfterReads;
+  }
+  const openPositions = statePositions.filter((p) => !p.closed);
+
   // ── app bookkeeping ────────────────────────────────────────────
-  const perf = readJson("lessons.json", {}).performance || [];
-  let pnlUsd = 0, feesUsd = 0, wins = 0, losses = 0, heldMin = 0;
+  // Two numeraires, both real and NOT interchangeable:
+  //   pnl_usd  = (withdrawals + fees − deposits) priced in USD by Meteora
+  //   pnl_sol  = the same cycle measured in SOL (Meteora's pnlSol)
+  // A position that is flat in SOL still shows a USD profit when SOL rises
+  // during the hold. The wallet is SOL-denominated, so the SOL column must
+  // come from pnl_sol — converting the USD sum at ONE current price smears
+  // a month of SOL price moves into the execution-cost residual (it hid
+  // ~1.10 SOL as of 3 Aug 2026).
+  let pnlUsd = 0, pnlSol = 0, feesUsd = 0, wins = 0, losses = 0, heldMin = 0;
+  let missingPnlSol = 0, missingPnlUsd = 0;
   for (const p of perf) {
     pnlUsd += p.pnl_usd || 0;
+    // Pre-dual-field entries (none as of 3 Aug 2026) fall back to the old
+    // current-price conversion so the total stays complete, and get counted
+    // so the report can warn that the SOL column is partly approximate.
+    if (Number.isFinite(p.pnl_sol)) pnlSol += p.pnl_sol;
+    else { missingPnlSol++; missingPnlUsd += p.pnl_usd || 0; }
     feesUsd += p.fees_earned_usd || 0;
     (p.pnl_usd || 0) >= 0 ? wins++ : losses++;
     heldMin += p.minutes_held || 0;
   }
   const ilUsd = pnlUsd - feesUsd;
-
-  const statePositions = Object.values(readJson("state.json", {}).positions || {});
-  const openPositions = statePositions.filter((p) => !p.closed);
-
-  // ── on-chain flows (retry once if a tx lands mid-computation) ──
-  let txs, balance, flowSum, consistent = false;
-  for (let attempt = 0; attempt < 2 && !consistent; attempt++) {
-    txs = await fetchAllTxs(wallet, process.env.HELIUS_API_KEY);
-    balance = await fetchBalance(wallet);
-    flowSum = txs.reduce((s, t) => s + walletChange(t, wallet), 0);
-    consistent = Math.abs(flowSum - balance) < 1e-6;
-  }
 
   let gasSol = 0, gasTxn = 0, depositIn = 0, withdrawOut = 0;
   for (const t of txs) {
@@ -152,8 +173,15 @@ export async function computePnlReport() {
   const llmUsd = await fetchLlmUsage();
 
   // ── the bridge: bookkeeping → real cash ────────────────────────
+  // SOL side is native (pnl_sol); USD side stays USD-native. The two do NOT
+  // convert into each other — that is the point, see the note above.
   const netRevBookUsd = pnlUsd;
-  const netRevBookSol = netRevBookUsd / solPrice;
+  const netRevBookSol = pnlSol + missingPnlUsd / solPrice;
+  // Fee LP has no stored SOL counterpart yet, so it is approximated at the
+  // current price; IL is derived (net − fees) so the SOL column still adds up
+  // and the approximation lands on the IL row, never on the bottom line.
+  const feesSol = feesUsd / solPrice;
+  const ilSol = netRevBookSol - feesSol;
   // realized cash of all CLOSED cycles = balance + locked − deposits
   const grossRealSol = balance + lockedOut - depositNet;          // after gas
   const netRevRealSol = grossRealSol + gasSol - lockedGas;        // before gas
@@ -171,6 +199,8 @@ export async function computePnlReport() {
       win_rate_pct: perf.length ? Math.round((wins / perf.length) * 100) : 0,
       avg_held_min: perf.length ? Math.round(heldMin / perf.length) : 0,
       fees_usd: feesUsd, il_usd: ilUsd, net_rev_usd: netRevBookUsd,
+      fees_sol: feesSol, il_sol: ilSol, net_rev_sol: netRevBookSol,
+      missing_pnl_sol: missingPnlSol,
     },
     bridge: {
       net_rev_book_sol: netRevBookSol,
@@ -210,9 +240,11 @@ export function formatPnlReport(r, { html = false } = {}) {
     `${r.perf.closed} closed | ${r.perf.wins}W/${r.perf.losses}L (${r.perf.win_rate_pct}%) | avg hold ${r.perf.avg_held_min}m | ${r.open.length} open`,
     "",
     "PEMBUKUAN (posisi closed)         USD       SOL",
-    row("Fee LP", r.perf.fees_usd, r.perf.fees_usd / sp),
-    row("Impermanent loss", r.perf.il_usd, r.perf.il_usd / sp),
-    row("Net Revenue", r.perf.net_rev_usd, b.net_rev_book_sol),
+    row("Fee LP", r.perf.fees_usd, r.perf.fees_sol),
+    row("Impermanent loss", r.perf.il_usd, r.perf.il_sol),
+    row("Net Revenue", r.perf.net_rev_usd, r.perf.net_rev_sol),
+    "  USD & SOL diukur terpisah (bukan konversi) — selisihnya = gerak",
+    "  harga SOL selama posisi dipegang. Kolom SOL yang dipakai di bawah.",
     "",
     "KAS RIIL ON-CHAIN",
     row("Biaya eksekusi", -b.exec_cost_sol * sp, -b.exec_cost_sol),
@@ -243,8 +275,11 @@ export function formatPnlReport(r, { html = false } = {}) {
   if (b.exec_cost_sol < -0.005) {
     lines.push("", "⚠️ Kas riil LEBIH BAIK dari pembukuan — biasanya ada entri close dengan quote pool yang salah (mis. flash-dump saat close). On-chain yang benar; cek entri performance terakhir.");
   }
+  if (r.perf.missing_pnl_sol) {
+    lines.push("", `⚠️ ${r.perf.missing_pnl_sol} entri tanpa pnl_sol — bagian itu masih dikonversi pakai harga SOL saat ini, jadi kolom SOL sedikit perkiraan.`);
+  }
   if (!r.consistent) {
-    lines.push("", "⚠️ Saldo & aliran tx belum sinkron (ada tx baru saat menghitung) — angka on-chain bisa meleset tipis; coba ulang.");
+    lines.push("", "⚠️ Snapshot tidak sinkron setelah 3 percobaan — ada tx/close yang mendarat saat laporan dihitung. Posisi yang tutup di sela bisa terhitung DUA KALI (modal terkunci + saldo). Jangan dipakai; ulangi saat agen sedang tenang.");
   }
 
   const stamp = r.generated_at.slice(0, 16).replace("T", " ");
