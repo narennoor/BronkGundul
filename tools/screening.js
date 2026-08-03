@@ -82,9 +82,15 @@ export function degenScore(pool, targets = {}) {
 
   const volRatio = Number(pool.volume_active_tvl_ratio);
   const tradingRatio = (Number.isFinite(volRatio) ? volRatio : Number(pool.volume_window || 0) / La) * tfScale;
-  const feeRatio = (Number.isFinite(Number(pool.fee_active_tvl_ratio))
-    ? Number(pool.fee_active_tvl_ratio)
-    : Number(pool.fee_window || 0) / La) * tfScale;
+  // fee_active_tvl_ratio is canonical-30m since era #8 (fee_tvl_timeframe says
+  // which window it came from) — scale from ITS window, not the screening
+  // timeframe, or a 30m value gets multiplied 6× as if it were a 5m rate. The
+  // fee_window fallback is still measured over the screening timeframe.
+  const feeRatioRaw = Number(pool.fee_active_tvl_ratio);
+  const feeTfMinutes = TIMEFRAME_MINUTES[pool.fee_tvl_timeframe] || tfMinutes;
+  const feeRatio = Number.isFinite(feeRatioRaw)
+    ? feeRatioRaw * (DEGEN_REFERENCE_MINUTES / feeTfMinutes)
+    : (Number(pool.fee_window || 0) / La) * tfScale;
   const lpActivity = (Number(pool.unique_lps || 0) + Number(pool.positions_created || 0)) * tfScale;
 
   const sTrading = clamp01(tradingRatio / targetVolRatio);
@@ -263,7 +269,9 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
     if (!pool) continue;
     pool[`volume_${sourceTimeframe}`] = pool.volume ?? null;
     pool[`volatility_${sourceTimeframe}`] = pool.volatility ?? null;
+    pool[`fee_active_tvl_ratio_${sourceTimeframe}`] = pool.fee_active_tvl_ratio ?? null;
     pool.volatility_timeframe = volatilityTimeframe;
+    pool.fee_tvl_timeframe = sourceTimeframe;
   }
 
   if (sourceTimeframe === volatilityTimeframe) return rawPools;
@@ -276,6 +284,7 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
           poolAddress,
           volatility: numeric(pool?.volatility),
           volume: numeric(pool?.volume),
+          feeActiveTvlRatio: numeric(pool?.fee_active_tvl_ratio),
         }))
     )
   );
@@ -293,10 +302,20 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
 
     pool[`volume_${volatilityTimeframe}`] = metrics.volume;
     pool[`volatility_${volatilityTimeframe}`] = metrics.volatility;
+    pool[`fee_active_tvl_ratio_${volatilityTimeframe}`] = metrics.feeActiveTvlRatio;
 
     // Use longer-timeframe values as the canonical ones for filtering
     if (metrics.volatility != null) pool.volatility = metrics.volatility;
     if (metrics.volume != null) pool.volume = metrics.volume;
+    // Era #8: fee/TVL 30m is canonical in the funnel too, matching the deploy
+    // gate's window (executor.js). The 5m sample stays on
+    // fee_active_tvl_ratio_5m for attribution. Cross-era evidence (n=146,
+    // era6 tail + era7): pools a 5m gate would block netted +0.45 SOL while
+    // the ones it would pass netted −0.69 — the fast window points backwards.
+    if (metrics.feeActiveTvlRatio != null) {
+      pool.fee_active_tvl_ratio = metrics.feeActiveTvlRatio;
+      pool.fee_tvl_timeframe = volatilityTimeframe;
+    }
   }
 
   return rawPools;
@@ -654,8 +673,13 @@ export async function discoverPools({
     s.maxTvl != null ? `tvl<=${s.maxTvl}` : null,
     `dlmm_bin_step>=${s.minBinStep}`,
     `dlmm_bin_step<=${s.maxBinStep}`,
+    // Floor stays in the query (5m window, practically a no-op at low floors)
+    // so page_size isn't diluted by dead pools. The cap is NOT sent since era
+    // #8: at the 5m window it silently killed pools whose 5m spiked but whose
+    // 30m — the window the deploy gate reads — was healthy. The authoritative
+    // min/max checks run client-side on the 30m value after
+    // applyVolatilityTimeframe.
     `fee_active_tvl_ratio>=${s.minFeeActiveTvlRatio}`,
-    s.maxFeeActiveTvlRatio != null ? `fee_active_tvl_ratio<=${s.maxFeeActiveTvlRatio}` : null,
     `base_token_organic_score>=${s.minOrganic}`,
     `quote_token_organic_score>=${s.minQuoteOrganic}`,
     s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
@@ -1108,6 +1132,7 @@ function condensePool(p) {
     fee_window: round(p.fee),
     volume_window: round(p.volume),
     fee_active_tvl_ratio: p.fee_active_tvl_ratio != null ? fix(p.fee_active_tvl_ratio, 4) : null,
+    fee_tvl_timeframe: p.fee_tvl_timeframe || config.screening.timeframe,
     volatility: fix(p.volatility, 4),
     volatility_timeframe: p.volatility_timeframe || getVolatilityTimeframe(config.screening.timeframe),
 
@@ -1117,6 +1142,8 @@ function condensePool(p) {
       [`volume_${p.volatility_timeframe}`]: round(p[`volume_${p.volatility_timeframe}`] ?? null),
       [`volatility_${config.screening.timeframe}`]: fix(p[`volatility_${config.screening.timeframe}`] ?? null, 4),
       [`volatility_${p.volatility_timeframe}`]: fix(p[`volatility_${p.volatility_timeframe}`] ?? null, 4),
+      [`fee_active_tvl_ratio_${config.screening.timeframe}`]: p[`fee_active_tvl_ratio_${config.screening.timeframe}`] != null ? fix(p[`fee_active_tvl_ratio_${config.screening.timeframe}`], 4) : null,
+      [`fee_active_tvl_ratio_${p.volatility_timeframe}`]: p[`fee_active_tvl_ratio_${p.volatility_timeframe}`] != null ? fix(p[`fee_active_tvl_ratio_${p.volatility_timeframe}`], 4) : null,
     } : {}),
 
     // Token health
