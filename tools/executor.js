@@ -10,10 +10,10 @@ import {
   searchPools,
   waitForCloseBookkeeping,
 } from "./dlmm.js";
-import { getWalletBalances, swapToken, normalizeMint } from "./wallet.js";
+import { getWalletBalances, swapToken, normalizeMint, reconcileCycleCash } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, attachExitExecution, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction } from "../state.js";
+import { setPositionInstruction, getTrackedPosition } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -880,6 +880,30 @@ export async function executeTool(name, args) {
                 swap_attempted: !!swapResult,
                 swap_success: !!swapped,
               });
+
+              // On-chain cash reconciliation (step 3). Fire-and-forget: it needs
+              // the signatures to be queryable, which can lag a beat, and nothing
+              // downstream waits on it. Deploy signatures come from state.json —
+              // recorded at deploy time, never inferred from a timestamp window.
+              const deployTxs = getTrackedPosition(posAddr)?.deploy_txs || [];
+              void reconcileCycleCash({
+                deploy_txs: deployTxs,
+                claim_txs: result.claim_txs || [],
+                close_txs: result.close_txs || [],
+                swap_tx: swapResult?.tx ?? null,
+              })
+                .then((cash) => {
+                  attachExitExecution(posAddr, cash);
+                  if (!cash.cash_complete) {
+                    // Positions deployed before deploy_txs existed have no
+                    // outflow to measure — expected once, not a fault.
+                    const why = deployTxs.length
+                      ? `${cash.cash_txs_missing} tx tak terbaca`
+                      : "posisi lama, deploy_txs belum terekam";
+                    log("executor_warn", `Cash recon incomplete for ${posAddr.slice(0, 8)}: ${why}`);
+                  }
+                })
+                .catch((e) => log("executor_warn", `Cash recon failed: ${e.message}`));
             }
           } catch (e) {
             log("executor_warn", `Exit-exec instrumentation failed: ${e.message}`);

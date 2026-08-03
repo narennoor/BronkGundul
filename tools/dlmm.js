@@ -933,6 +933,7 @@ export async function deployPosition({
       entry_fee_tvl_fast,
       entry_fee_tvl_slow,
       fee_gate_timeframe,
+      deploy_txs: txHashes,
     });
 
     appendDecision({
@@ -1749,6 +1750,7 @@ export async function closePosition({ position_address, reason }) {
         let finalValueUsd = 0;
         let initialUsd = 0;
         let feesUsd = tracked.total_fees_claimed_usd || 0;
+        let withdrawSol = null, depositSol = null, feesSol = null;
         try {
           const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
           for (let attempt = 0; attempt < 6; attempt++) {
@@ -1764,6 +1766,9 @@ export async function closePosition({ position_address, reason }) {
                 finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
                 initialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
                 feesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+                withdrawSol = parseFloat(posEntry.allTimeWithdrawals?.total?.sol || 0);
+                depositSol = parseFloat(posEntry.allTimeDeposits?.total?.sol || 0);
+                feesSol = parseFloat(posEntry.allTimeFees?.total?.sol || 0);
                 break;
               }
             }
@@ -1813,6 +1818,9 @@ export async function closePosition({ position_address, reason }) {
           final_value_usd: finalValueUsd,
           initial_value_usd: initialUsd,
           pnl_sol: Math.round(pnlSol * 10000) / 10000,
+          withdrawals_sol: withdrawSol,
+          deposits_sol: depositSol,
+          fees_earned_sol: feesSol,
           minutes_in_range: minutesHeld - minutesOOR,
           minutes_held: minutesHeld,
           close_reason: reason || "agent decision",
@@ -2055,6 +2063,7 @@ export async function closePosition({ position_address, reason }) {
       let finalValueUsd = 0;
       let initialUsd = 0;
       let feesUsd = tracked.total_fees_claimed_usd || 0;
+      let withdrawSol = null, depositSol = null, feesSol = null;
       const pnlSettleStartMs = Date.now();
       try {
         const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
@@ -2071,6 +2080,12 @@ export async function closePosition({ position_address, reason }) {
               const nextFinalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
               const nextInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
               const nextFeesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+              // SOL-native counterparts. The wallet is SOL-denominated, so these
+              // are the figures the on-chain cash reconciliation can be compared
+              // against; the USD ones drift with the SOL price during the hold.
+              const nextWithdrawSol = parseFloat(posEntry.allTimeWithdrawals?.total?.sol || 0);
+              const nextDepositSol = parseFloat(posEntry.allTimeDeposits?.total?.sol || 0);
+              const nextFeesSol = parseFloat(posEntry.allTimeFees?.total?.sol || 0);
 
               if (shouldRejectClosedPnl(nextPnlPct, reason || tracked?.close_reason)) {
                 log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`);
@@ -2082,7 +2097,10 @@ export async function closePosition({ position_address, reason }) {
                 finalValueUsd = nextFinalValueUsd;
                 initialUsd    = nextInitialUsd;
                 feesUsd       = nextFeesUsd;
-                log("close", `Closed PnL from API: pnl=${pnlTrueUsd.toFixed(2)} USD / ${pnlSol.toFixed(4)} SOL (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)} USD, deposited=${initialUsd.toFixed(2)} USD`);
+                withdrawSol   = nextWithdrawSol;
+                depositSol    = nextDepositSol;
+                feesSol       = nextFeesSol;
+                log("close", `Closed PnL from API: pnl=${pnlTrueUsd.toFixed(2)} USD / ${pnlSol.toFixed(4)} SOL (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)} USD / ${withdrawSol.toFixed(4)} SOL, deposited=${initialUsd.toFixed(2)} USD`);
                 break;
               }
             } else {
@@ -2155,6 +2173,11 @@ export async function closePosition({ position_address, reason }) {
         final_value_usd: finalValueUsd,
         initial_value_usd: initialUsd,
         pnl_sol: Math.round(pnlSol * 10000) / 10000,
+        // SOL-native trio from Meteora — the basis for liquidation_gap_sol and
+        // (for fees) the piece /pnl still has to approximate at current price.
+        withdrawals_sol: withdrawSol,
+        deposits_sol: depositSol,
+        fees_earned_sol: feesSol,
         minutes_in_range: minutesHeld - minutesOOR,
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",

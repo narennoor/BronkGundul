@@ -79,6 +79,7 @@ export function trackPosition({
   entry_fee_tvl_fast = null,
   entry_fee_tvl_slow = null,
   fee_gate_timeframe = null,
+  deploy_txs = [],
 }) {
   const state = load();
   state.positions[position] = {
@@ -107,6 +108,10 @@ export function trackPosition({
     entry_fee_tvl_slow,
     fee_gate_timeframe,
     signal_snapshot: signal_snapshot || null,
+    // Signatures of the deploy txs, so the close-side cash reconciliation can
+    // measure the outflow exactly. Never infer these from a timestamp window —
+    // a ±150s scan mismatched 2 of 54 closes when deploys landed close together.
+    deploy_txs,
     deployed_at: new Date().toISOString(),
     out_of_range_since: null,
     last_claim_at: null,

@@ -123,6 +123,85 @@ export async function getWalletBalances() {
 }
 
 /**
+ * Net native-SOL change for our wallet across a list of signatures.
+ * `postBalance - preBalance` already nets out the fee the wallet paid, so the
+ * result is real cash movement. A signature that is not yet queryable is
+ * retried; anything still missing is reported rather than silently counted
+ * as zero.
+ *
+ * @returns {Promise<{sol: number, found: number, missing: number}>}
+ */
+async function walletSolDelta(signatures, { attempts = 3, delayMs = 2000 } = {}) {
+  const sigs = (signatures || []).filter(Boolean);
+  if (!sigs.length) return { sol: 0, found: 0, missing: 0 };
+
+  const connection = getConnection();
+  const me = getWallet().publicKey.toString();
+  let sol = 0, found = 0, missing = 0;
+
+  for (const sig of sigs) {
+    let tx = null;
+    for (let attempt = 0; attempt < attempts && !tx; attempt++) {
+      if (attempt) await new Promise((r) => setTimeout(r, delayMs));
+      try {
+        tx = await connection.getTransaction(sig, {
+          maxSupportedTransactionVersion: 0,
+          commitment: "confirmed",
+        });
+      } catch { /* transient RPC — retry */ }
+    }
+    // Static keys only, deliberately: `getAccountKeys()` throws on versioned
+    // messages with address-table lookups, and our wallet is always a signer,
+    // so it is always static. Static keys are the prefix of the balance arrays,
+    // so the index is valid either way — including Jupiter RFQ fills where the
+    // market maker, not us, is the fee payer.
+    const msg = tx?.transaction?.message;
+    const keys = msg?.staticAccountKeys || msg?.accountKeys || [];
+    const idx = keys.findIndex((k) => k?.toString() === me);
+    if (!tx || idx < 0) { missing++; continue; }
+    sol += (tx.meta.postBalances[idx] - tx.meta.preBalances[idx]) / 1e9;
+    found++;
+  }
+  return { sol: Math.round(sol * 1e9) / 1e9, found, missing };
+}
+
+/**
+ * Per-cycle cash reconciliation: what the wallet actually paid out at deploy
+ * and actually got back at claim/close/swap, measured on-chain.
+ *
+ * Motivation (3 Aug 2026 analysis): closes that need no swap reconcile against
+ * Meteora's bookkeeping to the lamport, while closes that do need one leak
+ * ~1.9% of the swapped bag. Only ~0.7pp of that is referral + route; the rest
+ * is the gap between Meteora's active-bin valuation of the withdrawn token and
+ * the price Jupiter will actually pay for the whole bag seconds later. These
+ * fields make that gap directly measurable instead of a residual.
+ *
+ * Read-only and off the execution path — call it after the swap has settled.
+ */
+export async function reconcileCycleCash({ deploy_txs, claim_txs, close_txs, swap_tx }) {
+  const [deploy, claim, close, swap] = await Promise.all([
+    walletSolDelta(deploy_txs),
+    walletSolDelta(claim_txs),
+    walletSolDelta(close_txs),
+    walletSolDelta(swap_tx ? [swap_tx] : []),
+  ]);
+  const missing = deploy.missing + claim.missing + close.missing + swap.missing;
+  return {
+    sol_out_deploy: deploy.sol,
+    sol_in_claim: claim.sol,
+    sol_in_close: close.sol,
+    sol_in_swap: swap.sol,
+    // Full round trip. Should equal pnl_sol minus gas when the books are right.
+    sol_cycle_net: Math.round((deploy.sol + claim.sol + close.sol + swap.sol) * 1e9) / 1e9,
+    cash_txs_found: deploy.found + claim.found + close.found + swap.found,
+    cash_txs_missing: missing,
+    // Any unresolved signature makes the totals incomplete — mark it so no
+    // analysis mistakes a partial sum for a real shortfall.
+    cash_complete: missing === 0 && deploy.found > 0 && close.found > 0,
+  };
+}
+
+/**
  * Swap tokens via Jupiter Swap API V2 (order → sign → execute).
  */
 const SOL_MINT = "So11111111111111111111111111111111111111112";

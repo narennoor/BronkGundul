@@ -226,12 +226,44 @@ export async function recordPerformance(perf) {
  * @param {Object} exec - see executor.js close_position post-effect for shape
  * @returns {boolean} true if an entry was found and updated
  */
+/**
+ * The number the 3 Aug 2026 exec-cost analysis could not see: how much SOL is
+ * lost between Meteora saying "you withdrew X SOL worth" and the wallet
+ * actually holding that SOL after the base token is sold.
+ *
+ *   liquidation_gap_sol = (cash actually received) − (what Meteora said came out)
+ *
+ * Cash received = claim + close + swap deltas. Meteora's figure is
+ * `withdrawals_sol` (active-bin valuation of both tokens at withdrawal).
+ * Negative = the market paid less than the pool's own mark, which is the normal
+ * direction: route fee, referral, and — the dominant part — the pool's marginal
+ * price not surviving contact with the whole bag. Closes that exit all-SOL
+ * reconcile to ~0, so a non-trivial gap here always points at the swap leg.
+ *
+ * Returns null when either side is unavailable, so partial data never turns
+ * into a fake zero.
+ */
+function deriveLiquidationGapSol(entry, exec) {
+  const withdrawn = entry?.withdrawals_sol;
+  if (!Number.isFinite(withdrawn) || withdrawn <= 0) return null;
+  if (!exec?.cash_complete) return null;
+  const received = (exec.sol_in_claim || 0) + (exec.sol_in_close || 0) + (exec.sol_in_swap || 0);
+  return Math.round((received - withdrawn) * 1e9) / 1e9;
+}
+
 export function attachExitExecution(positionAddress, exec) {
   if (!positionAddress || !exec) return false;
   const data = load();
   for (let i = data.performance.length - 1; i >= 0; i--) {
     if (data.performance[i].position === positionAddress) {
-      data.performance[i].exit_execution = exec;
+      const entry = data.performance[i];
+      // MERGE, never replace: the swap-side data and the on-chain cash
+      // reconciliation attach separately (the latter runs fire-and-forget once
+      // the signatures are queryable), and each must not wipe the other.
+      const merged = { ...(entry.exit_execution || {}), ...exec };
+      const gap = deriveLiquidationGapSol(entry, merged);
+      if (gap != null) merged.liquidation_gap_sol = gap;
+      entry.exit_execution = merged;
       save(data);
       return true;
     }
