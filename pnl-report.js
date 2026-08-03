@@ -123,6 +123,7 @@ export async function computePnlReport() {
   // ~1.10 SOL as of 3 Aug 2026).
   let pnlUsd = 0, pnlSol = 0, feesUsd = 0, wins = 0, losses = 0, heldMin = 0;
   let missingPnlSol = 0, missingPnlUsd = 0;
+  let feesSolNative = 0, feesUsdNoSol = 0, feesSolExact = 0;
   for (const p of perf) {
     pnlUsd += p.pnl_usd || 0;
     // Pre-dual-field entries (none as of 3 Aug 2026) fall back to the old
@@ -131,6 +132,12 @@ export async function computePnlReport() {
     if (Number.isFinite(p.pnl_sol)) pnlSol += p.pnl_sol;
     else { missingPnlSol++; missingPnlUsd += p.pnl_usd || 0; }
     feesUsd += p.fees_earned_usd || 0;
+    // `fees_earned_sol` only exists from 3 Aug 2026 on, so the SOL fee total is
+    // exact for those closes and current-price-approximated for the rest. The
+    // mix converges to fully exact on its own; coverage is reported so nobody
+    // has to guess how approximate the row currently is.
+    if (Number.isFinite(p.fees_earned_sol)) { feesSolNative += p.fees_earned_sol; feesSolExact++; }
+    else feesUsdNoSol += p.fees_earned_usd || 0;
     (p.pnl_usd || 0) >= 0 ? wins++ : losses++;
     heldMin += p.minutes_held || 0;
   }
@@ -151,18 +158,31 @@ export async function computePnlReport() {
   }
   const depositNet = depositIn - withdrawOut;
 
-  // Exact SOL locked in open positions: their deploy txs (principal + rent + gas),
-  // matched by timestamp window. Deploys are minutes apart (screening interval),
-  // so a 150s window cannot capture another position's deploy txs.
+  // SOL locked in open positions = their deploy txs (principal + rent + gas).
+  // Matched by the signatures recorded at deploy time. The old ±150s timestamp
+  // window assumed deploys are always minutes apart; that broke on 2 of 54
+  // closes in the 3 Aug 2026 reconciliation once deploys landed close together,
+  // and a mismatch here silently mis-states equity. Positions deployed before
+  // `deploy_txs` existed still use the window, and say so.
   const openDetail = openPositions.map((p) => {
-    const t0 = Date.parse(p.deployed_at) / 1000;
-    const mine = txs.filter(
-      (t) => t.timestamp >= t0 - 20 && t.timestamp <= t0 + 150 &&
-        OUTFLOW_TX_TYPES.has(t.type) && walletChange(t, wallet) < 0,
-    );
+    const sigs = Array.isArray(p.deploy_txs) ? p.deploy_txs.filter(Boolean) : [];
+    let mine = sigs.length ? txs.filter((t) => sigs.includes(t.signature)) : [];
+    // A recorded signature that is not in the fetched history (paging limit,
+    // or an RPC that dropped it) would silently under-count the outflow.
+    const matchedBy = sigs.length && mine.length === sigs.length ? "signature" : "timestamp";
+    if (matchedBy === "timestamp") {
+      const t0 = Date.parse(p.deployed_at) / 1000;
+      mine = txs.filter(
+        (t) => t.timestamp >= t0 - 20 && t.timestamp <= t0 + 150 &&
+          OUTFLOW_TX_TYPES.has(t.type) && walletChange(t, wallet) < 0,
+      );
+    }
     const outflow = -mine.reduce((s, t) => s + walletChange(t, wallet), 0);
     const gasIn = mine.reduce((s, t) => s + (t.feePayer === wallet ? t.fee / 1e9 : 0), 0);
-    return { pool: p.pool_name, principal: p.amount_sol || 0, outflow, gasIn, deployed_at: p.deployed_at };
+    return {
+      pool: p.pool_name, principal: p.amount_sol || 0, outflow, gasIn,
+      deployed_at: p.deployed_at, matched_by: matchedBy,
+    };
   });
   const lockedOut = openDetail.reduce((s, o) => s + o.outflow, 0);
   const lockedGas = openDetail.reduce((s, o) => s + o.gasIn, 0);
@@ -177,10 +197,10 @@ export async function computePnlReport() {
   // convert into each other — that is the point, see the note above.
   const netRevBookUsd = pnlUsd;
   const netRevBookSol = pnlSol + missingPnlUsd / solPrice;
-  // Fee LP has no stored SOL counterpart yet, so it is approximated at the
-  // current price; IL is derived (net − fees) so the SOL column still adds up
-  // and the approximation lands on the IL row, never on the bottom line.
-  const feesSol = feesUsd / solPrice;
+  // Fee LP: native SOL where recorded, current-price fallback for the rest.
+  // IL stays derived (net − fees) so the column adds up and whatever
+  // approximation remains lands on the IL row, never on the bottom line.
+  const feesSol = feesSolNative + feesUsdNoSol / solPrice;
   const ilSol = netRevBookSol - feesSol;
   // realized cash of all CLOSED cycles = balance + locked − deposits
   const grossRealSol = balance + lockedOut - depositNet;          // after gas
@@ -201,6 +221,7 @@ export async function computePnlReport() {
       fees_usd: feesUsd, il_usd: ilUsd, net_rev_usd: netRevBookUsd,
       fees_sol: feesSol, il_sol: ilSol, net_rev_sol: netRevBookSol,
       missing_pnl_sol: missingPnlSol,
+      fees_sol_exact: feesSolExact,
     },
     bridge: {
       net_rev_book_sol: netRevBookSol,
@@ -245,6 +266,9 @@ export function formatPnlReport(r, { html = false } = {}) {
     row("Net Revenue", r.perf.net_rev_usd, r.perf.net_rev_sol),
     "  USD & SOL diukur terpisah (bukan konversi) — selisihnya = gerak",
     "  harga SOL selama posisi dipegang. Kolom SOL yang dipakai di bawah.",
+    r.perf.fees_sol_exact < r.perf.closed
+      ? `  Fee LP kolom SOL: ${r.perf.fees_sol_exact}/${r.perf.closed} eksak, sisanya perkiraan harga kini (IL menyerap selisihnya).`
+      : null,
     "",
     "KAS RIIL ON-CHAIN",
     row("Biaya eksekusi", -b.exec_cost_sol * sp, -b.exec_cost_sol),
@@ -270,7 +294,13 @@ export function formatPnlReport(r, { html = false } = {}) {
       : "n/a").padStart(10)}`,
   ];
   if (r.open.length) {
-    lines.push("", `Open: ${r.open.map((o) => `${o.pool} ${o.principal}`).join(" | ")}`);
+    // "~" marks a position whose deploy txs were matched by timestamp window
+    // instead of recorded signatures — its locked-SOL figure can be off.
+    lines.push("", `Open: ${r.open.map((o) => `${o.pool} ${o.principal}${o.matched_by === "timestamp" ? "~" : ""}`).join(" | ")}`);
+    const fuzzy = r.open.filter((o) => o.matched_by === "timestamp").length;
+    if (fuzzy) {
+      lines.push(`  ~ ${fuzzy} posisi dicocokkan lewat jendela waktu (deploy_txs belum terekam) — modal terkuncinya bisa meleset.`);
+    }
   }
   if (b.exec_cost_sol < -0.005) {
     lines.push("", "⚠️ Kas riil LEBIH BAIK dari pembukuan — biasanya ada entri close dengan quote pool yang salah (mis. flash-dump saat close). On-chain yang benar; cek entri performance terakhir.");
@@ -284,9 +314,11 @@ export function formatPnlReport(r, { html = false } = {}) {
 
   const stamp = r.generated_at.slice(0, 16).replace("T", " ");
   const title = `📒 PnL Meridian — ${stamp} UTC | SOL $${sp.toFixed(2)}`;
+  // Conditional rows are emitted as null; drop them so they don't become blanks.
+  const body = lines.filter((l) => l != null).join("\n");
   if (html) {
     const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    return `<b>${esc(title)}</b>\n<pre>${esc(lines.join("\n"))}</pre>`;
+    return `<b>${esc(title)}</b>\n<pre>${esc(body)}</pre>`;
   }
-  return `${title}\n${lines.join("\n")}`;
+  return `${title}\n${body}`;
 }
