@@ -81,14 +81,41 @@ export function getFunnelStats() {
   return load();
 }
 
+const FUNNEL_HISTORY_FILE = repoPath("funnel-stats-history.json");
+
+/**
+ * Era rotation: archive the current counters to funnel-stats-history.json and
+ * start fresh with an era label. Counters that span a config change are
+ * unattributable (the era-7 review could not slice 16k cycles back to eras),
+ * so every era flip should rotate. Called from scripts/rotate-funnel-stats.mjs
+ * at era start — the daemon never calls this. Safe against a live daemon:
+ * recordFunnelCycle round-trips the whole object, so the era field survives
+ * its writes; the ops script verifies the reset landed.
+ */
+export function rotateFunnelStats(eraLabel) {
+  if (!eraLabel || typeof eraLabel !== "string") throw new Error("rotateFunnelStats needs an era label");
+  const db = load();
+  let history = [];
+  try {
+    if (fs.existsSync(FUNNEL_HISTORY_FILE)) history = JSON.parse(fs.readFileSync(FUNNEL_HISTORY_FILE, "utf8"));
+  } catch { /* corrupt history never blocks a rotation — start a new one */ }
+  history.push({ era: db.era ?? null, since: db.since, archived_at: new Date().toISOString(), client: db.client, shadow: db.shadow });
+  fs.writeFileSync(FUNNEL_HISTORY_FILE, JSON.stringify(history, null, 2));
+  const fresh = { era: eraLabel, since: new Date().toISOString(), client: emptySection(), shadow: emptySection() };
+  save(fresh);
+  return fresh;
+}
+
 /** Compact one-line summary for logs: top killers by unique kills. */
 export function summarizeFunnel(section = "client", topN = 4) {
-  const s = load()[section];
-  if (!s || s.cycles === 0) return `${section}: no data`;
+  const db = load();
+  const s = db[section];
+  const tag = db.era ? `${section}@${db.era}` : section;
+  if (!s || s.cycles === 0) return `${tag}: no data`;
   const top = Object.entries(s.filters)
     .sort((a, b) => b[1].unique_kills - a[1].unique_kills || b[1].kills - a[1].kills)
     .slice(0, topN)
     .map(([name, r]) => `${name}=${r.unique_kills}u/${r.kills}k`)
     .join(", ");
-  return `${section}: ${s.cycles} cycles, ${s.pools_seen} seen, ${s.passed} passed | top: ${top}`;
+  return `${tag}: ${s.cycles} cycles, ${s.pools_seen} seen, ${s.passed} passed | top: ${top}`;
 }
