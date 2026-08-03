@@ -27,6 +27,7 @@ decision-log.json
 hivemind-cache.json
 signal-weights.json
 funnel-stats.json
+funnel-stats-history.json
 bot-filter-memory.json
 
 # Logs
