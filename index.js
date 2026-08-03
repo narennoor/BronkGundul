@@ -812,9 +812,26 @@ Summarize the current portfolio health, total fees earned, and performance of al
   const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
   const confirmTicks = Math.max(1, Number(config.pnl.confirmTicks ?? 2));
   const tpConfirmSec = Math.max(0, Number(config.pnl.takeProfitConfirmSec ?? 15));
+  const busyPollMs = Math.max(pnlPollMs, Number(config.pnl.busyPollIntervalSec ?? 9) * 1000);
   let _pnlPollBusy = false;
+  let _lastBusyPollAt = 0;
   const pnlPollInterval = setInterval(async () => {
-    if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
+    if (_pnlPollBusy) return;
+    // Management-busy ALWAYS skips: the management cycle evaluates exits itself,
+    // and a poll-triggered close holds the same lock — ticking here risks
+    // double-acting on the same position.
+    if (_managementBusy) return;
+    if (_screeningBusy) {
+      // Blind-window fix (pnlPollDuringCycles, era-8): screening cycles run
+      // 45s-2min+ and used to suspend detection entirely — SL/trailing events
+      // in those windows landed ~1pp deeper (analysis 3 Aug). With the flag on,
+      // keep ticking at the reduced busy rate to spare RPC. State writes in
+      // the tick path (streaks, tracking) are synchronous fs ops — atomic on
+      // the event loop, no interleaving with the screening thread's writes.
+      if (!config.pnl.pollDuringCycles) return;
+      if (Date.now() - _lastBusyPollAt < busyPollMs) return;
+      _lastBusyPollAt = Date.now();
+    }
     if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
     try {

@@ -460,6 +460,9 @@ const toolMap = {
       // pnl poller
       pnlConfirmTicks: ["pnl", "confirmTicks"],
       pnlTakeProfitConfirmSec: ["pnl", "takeProfitConfirmSec"],
+      // blind-window fix (era-8): flag applies live; busy interval needs restart
+      pnlPollDuringCycles: ["pnl", "pollDuringCycles"],
+      pnlBusyPollIntervalSec: ["pnl", "busyPollIntervalSec"],
       // opportunity poller (interval/enabled changes apply on next restart)
       opportunityPollEnabled: ["opportunity", "enabled"],
       opportunityPollIntervalSec: ["opportunity", "pollIntervalSec"],

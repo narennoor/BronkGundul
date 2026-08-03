@@ -263,6 +263,15 @@ export const config = {
     // "take profit" close confirmed in 2 ticks, realized -13.57% seventeen seconds
     // later). 0 disables the extra hold.
     takeProfitConfirmSec: Number(u.pnlTakeProfitConfirmSec ?? 15),
+    // Era-8 candidate (default OFF): keep the poller ticking while a SCREENING
+    // cycle is busy instead of skipping — closes the detection blind window
+    // (measured 2 Aug: 43 gaps >90s, worst 20 effective ticks per 36 min).
+    // Ticks run at the reduced busyPollIntervalSec rate to spare RPC while a
+    // cycle's own calls are in flight. Management-busy still skips entirely:
+    // the management cycle evaluates exits itself and a poll-triggered close
+    // holds the same lock (double-act guard).
+    pollDuringCycles: u.pnlPollDuringCycles === true,
+    busyPollIntervalSec: Number(u.pnlBusyPollIntervalSec ?? 9),
   },
 
   // ─── Opportunity poller (catches strong pools between screening cycles) ──
