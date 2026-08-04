@@ -20,6 +20,7 @@ import {
   recordClaim,
   recordClose,
   getTrackedPosition,
+  getTrackedPositions,
   minutesOutOfRange,
   syncOpenPositions,
 } from "../state.js";
@@ -640,8 +641,71 @@ export async function deployPosition({
   }
 
   if (process.env.DRY_RUN === "true") {
+    // Paper position: track in state + log the deploy decision so DRY_RUN
+    // exercises the full lifecycle (maxPositions gate, occupied-pool/mint
+    // filters, manager cycles, OOR bookkeeping) instead of redeploying the
+    // same pools every cycle. No transaction is sent; getMyPositions merges
+    // these back in via appendDryPositions.
+    const dryMinBinId = activeBin.binId - activeBinsBelow;
+    const dryMaxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
+    const dryPosition = `DRY-${pool_address.slice(0, 8)}-${Date.now()}`;
+    const signalSnapshot = config.darwin?.enabled
+      ? getAndClearStagedSignals(pool_address, baseMint)
+      : null;
+    trackPosition({
+      position: dryPosition,
+      pool: pool_address,
+      pool_name,
+      base_mint: baseMint,
+      dry: true,
+      strategy: activeStrategy,
+      strategy_source: strategySource,
+      bin_range: { min: dryMinBinId, max: dryMaxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
+      bin_step: bin_step ?? actualBinStep,
+      base_fee,
+      sw_size_boosted: swSizeBoosted,
+      volatility: normalizedVolatility,
+      fee_tvl_ratio,
+      organic_score,
+      amount_sol: finalAmountY,
+      amount_x: finalAmountX,
+      active_bin: activeBin.binId,
+      initial_value_usd,
+      signal_snapshot: signalSnapshot,
+      entry_mcap,
+      entry_tvl,
+      entry_volume,
+      entry_holders,
+      entry_fee_tvl_fast,
+      entry_fee_tvl_slow,
+      fee_gate_timeframe,
+    });
+    appendDecision({
+      type: "deploy",
+      actor: "SCREENER",
+      pool: pool_address,
+      pool_name,
+      position: dryPosition,
+      summary: `[DRY RUN] Would deploy ${finalAmountY} SOL with ${activeStrategy}`,
+      reason: `Chosen range ${dryMinBinId}→${dryMaxBinId} around active bin ${activeBin.binId}`,
+      risks: [
+        normalizedVolatility != null ? `volatility ${normalizedVolatility}` : null,
+        fee_tvl_ratio != null ? `fee/TVL ${fee_tvl_ratio}%` : null,
+      ].filter(Boolean),
+      metrics: {
+        amount_sol: finalAmountY,
+        strategy: activeStrategy,
+        active_bin: activeBin.binId,
+        min_bin: dryMinBinId,
+        max_bin: dryMaxBinId,
+        downside_pct: downside_pct ?? null,
+        upside_pct: upside_pct ?? null,
+      },
+    });
+    _positionsCacheAt = 0;
     return {
       dry_run: true,
+      position: dryPosition,
       would_deploy: {
         pool_address,
         strategy: activeStrategy,
@@ -655,7 +719,7 @@ export async function deployPosition({
         sw_size_boosted: swSizeBoosted,
         wide_range: totalBins > 69,
       },
-      message: "DRY RUN — no transaction sent",
+      message: `DRY RUN — no transaction sent; tracked as paper position ${dryPosition}`,
     };
   }
 
@@ -762,6 +826,7 @@ export async function deployPosition({
           position: positionAddress,
           pool: pool_address,
           pool_name,
+          base_mint: baseMint,
           strategy: activeStrategy,
           strategy_source: strategySource,
           bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
@@ -912,6 +977,7 @@ export async function deployPosition({
       position: newPosition.publicKey.toString(),
       pool: pool_address,
       pool_name,
+      base_mint: baseMint,
       strategy: activeStrategy,
       strategy_source: strategySource,
       bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
@@ -1223,6 +1289,65 @@ async function fetchRawOpenPositionsFromMeridian({ walletAddress, agentId }) {
 }
 
 // ─── Get My Positions ──────────────────────────────────────────
+// DRY_RUN paper positions: merge open dry-tracked positions into a getMyPositions
+// result so the maxPositions gate, occupied-pool/mint screening filters, and the
+// manager cycle all exercise during observation. PnL stays unpriced
+// (pnl_pct_suspicious) so PnL-gated rules pause; OOR detection uses the real
+// active bin, so the OOR and max-hold rules still fire. Merging BEFORE
+// syncOpenPositions keeps sync from auto-closing them while DRY_RUN is on;
+// with DRY_RUN off this is a no-op and stale dry positions sync away normally.
+async function appendDryPositions(result) {
+  if (process.env.DRY_RUN !== "true" || !result?.positions) return result;
+  const dryTracked = getTrackedPositions(true).filter((p) => p.dry);
+  if (dryTracked.length === 0) return result;
+  const have = new Set(result.positions.map((p) => p.position));
+  for (const tracked of dryTracked) {
+    if (have.has(tracked.position)) continue;
+    let activeBinId = null;
+    try {
+      const pool = await getPool(tracked.pool);
+      activeBinId = (await pool.getActiveBin()).binId;
+    } catch (e) {
+      log("positions_warn", `Dry position ${tracked.position}: active bin fetch failed (${e.message}) — using deploy-time bin`);
+      activeBinId = tracked.active_bin_at_deploy ?? null;
+    }
+    const lowerBin = tracked.bin_range?.min ?? null;
+    const upperBin = tracked.bin_range?.max ?? null;
+    const inRange = activeBinId != null && lowerBin != null && upperBin != null
+      ? activeBinId >= lowerBin && activeBinId <= upperBin
+      : true;
+    if (inRange) markInRange(tracked.position);
+    else markOutOfRange(tracked.position);
+    result.positions.push({
+      position: tracked.position,
+      pool: tracked.pool,
+      pair: tracked.pool_name || tracked.pool,
+      base_mint: tracked.base_mint ?? null,
+      lower_bin: lowerBin,
+      upper_bin: upperBin,
+      active_bin: activeBinId,
+      in_range: inRange,
+      unclaimed_fees_usd: 0,
+      total_value_usd: null,
+      pnl_usd: null,
+      pnl_sol: null,
+      pnl_pct: null,
+      pnl_pct_derived: null,
+      pnl_pct_diff: null,
+      pnl_pct_suspicious: true,
+      fee_per_tvl_24h: null,
+      age_minutes: tracked.deployed_at
+        ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
+        : null,
+      minutes_out_of_range: minutesOutOfRange(tracked.position),
+      instruction: tracked.instruction ?? null,
+      dry: true,
+    });
+  }
+  result.total_positions = result.positions.length;
+  return result;
+}
+
 export async function getMyPositions({ force = false, silent = false, wallet_address = null } = {}) {
   let walletOverride = null;
   try {
@@ -1253,6 +1378,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl})...`);
         const rpcResult = await computePositions(walletAddress);
         if (useLocalWallet) {
+          await appendDryPositions(rpcResult);
           syncOpenPositions(rpcResult.positions.map((p) => p.position));
           _positionsCache = rpcResult;
           _positionsCacheAt = Date.now();
@@ -1430,7 +1556,8 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       source: "meteora",
     };
     if (useLocalWallet) {
-      syncOpenPositions(positions.map(p => p.position));
+      await appendDryPositions(result);
+      syncOpenPositions(result.positions.map(p => p.position));
       _positionsCache = result;
       _positionsCacheAt = Date.now();
     }
@@ -1604,6 +1731,32 @@ export async function waitForCloseBookkeeping(position_address, timeoutMs = 60_0
 export async function closePosition({ position_address, reason }) {
   position_address = normalizeMint(position_address);
   if (process.env.DRY_RUN === "true") {
+    // Paper close: mark the dry-tracked position closed in state and log the
+    // decision so the manager lifecycle completes. No performance/lesson entry —
+    // dry positions have no priced PnL and must not pollute learning data.
+    // No base_mint in the result, so the executor's auto-swap stays off.
+    const dryTracked = getTrackedPosition(position_address);
+    if (dryTracked?.dry && !dryTracked.closed) {
+      recordClose(position_address, `${reason || "manual"} (dry run)`);
+      appendDecision({
+        type: "close",
+        actor: "MANAGER",
+        pool: dryTracked.pool,
+        pool_name: dryTracked.pool_name,
+        position: position_address,
+        summary: `[DRY RUN] Closed paper position${dryTracked.deployed_at ? ` after ${Math.floor((Date.now() - new Date(dryTracked.deployed_at).getTime()) / 60000)}m` : ""}`,
+        reason: reason || "manual",
+      });
+      _positionsCacheAt = 0;
+      return {
+        success: true,
+        dry_run: true,
+        position: position_address,
+        pool: dryTracked.pool,
+        pool_name: `${dryTracked.pool_name || dryTracked.pool} (DRY)`,
+        message: "DRY RUN — paper position closed in state only; no transaction sent",
+      };
+    }
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
   }
 

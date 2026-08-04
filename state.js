@@ -80,12 +80,16 @@ export function trackPosition({
   entry_fee_tvl_slow = null,
   fee_gate_timeframe = null,
   deploy_txs = [],
+  base_mint = null,
+  dry = false,
 }) {
   const state = load();
   state.positions[position] = {
     position,
     pool,
     pool_name,
+    base_mint,
+    dry: !!dry,
     strategy,
     strategy_source,
     bin_range,
