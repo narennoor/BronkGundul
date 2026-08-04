@@ -5,7 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
-import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
+import { getMyPositions, closePosition, getActiveBin, countablePositions } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
@@ -344,7 +344,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     // Trigger screening after management
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
-    const afterCount = afterPositions?.positions?.length ?? 0;
+    const afterCount = afterPositions ? countablePositions(afterPositions) : 0;
     if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
       log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
@@ -426,10 +426,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let screenReport = null;
   try {
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
-    if (prePositions.total_positions >= config.risk.maxPositions) {
-      log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
-      screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
-      appendScreeningSkipOnce(`Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
+    const preCount = countablePositions(prePositions);
+    if (preCount >= config.risk.maxPositions) {
+      log("cron", `Screening skipped — max positions reached (${preCount}/${config.risk.maxPositions})`);
+      screenReport = `Screening skipped — max positions reached (${preCount}/${config.risk.maxPositions}).`;
+      appendScreeningSkipOnce(`Max positions reached (${preCount}/${config.risk.maxPositions})`);
       _screeningBusy = false;
       return screenReport;
     }
@@ -644,7 +645,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
-Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
+Positions: ${countablePositions(prePositions)}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
 
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
@@ -891,7 +892,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
           getMyPositions({ force: true, silent: true }).catch(() => null),
           getWalletBalances().catch(() => null),
         ]);
-        if (!positions || (positions.total_positions ?? 0) >= config.risk.maxPositions) return;
+        if (!positions || countablePositions(positions) >= config.risk.maxPositions) return;
         const minRequired = config.management.deployAmountSol + config.management.gasReserve;
         if (process.env.DRY_RUN !== "true" && (!balance || balance.sol < minRequired)) return;
 
