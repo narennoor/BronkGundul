@@ -1348,6 +1348,16 @@ async function appendDryPositions(result) {
   return result;
 }
 
+// DRY_RUN: only paper positions count toward the maxPositions quota — real
+// positions in the shared wallet belong to a live agent elsewhere and would
+// otherwise starve the simulation's screening cycles. Live mode counts all.
+// Occupied-pool/mint filters intentionally still see the full list.
+export function countablePositions(result) {
+  const positions = result?.positions || [];
+  if (process.env.DRY_RUN === "true") return positions.filter((p) => p.dry).length;
+  return positions.length;
+}
+
 export async function getMyPositions({ force = false, silent = false, wallet_address = null } = {}) {
   let walletOverride = null;
   try {

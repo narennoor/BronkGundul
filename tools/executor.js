@@ -3,6 +3,7 @@ import {
   getActiveBin,
   deployPosition,
   getMyPositions,
+  countablePositions,
   getWalletPositions,
   getPositionPnl,
   claimFees,
@@ -1015,7 +1016,7 @@ async function runSafetyChecks(name, args) {
 
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
       const positions = await getMyPositions({ force: true });
-      if (positions.total_positions >= config.risk.maxPositions) {
+      if (countablePositions(positions) >= config.risk.maxPositions) {
         return {
           pass: false,
           reason: `Max positions (${config.risk.maxPositions}) reached. Close a position first.`,
