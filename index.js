@@ -621,6 +621,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           narrative_quality:     n?.narrative ? "present" : "absent",
           volatility:            pool.volatility            ?? null,
           // Attribution only — not in signal-weights SIGNAL_NAMES, so Darwin ignores these
+          token_age_hours:       pool.token_age_hours       ?? null,
           gmgn_trending:         Boolean(pool.gmgn_trending),
           gmgn_trending_rank:    pool.gmgn_trending_rank    ?? null,
           gmgn_smart_degen_count: pool.gmgn_smart_degen_count ?? null,
@@ -1021,7 +1022,7 @@ function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
+  if (!pnlSuspect && position.pnl_pct != null && managementConfig.stopLossPct != null && position.pnl_pct <= managementConfig.stopLossPct) {
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {

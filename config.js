@@ -150,7 +150,9 @@ export const config = {
     // a token that just pumped/dumped means buying the retrace. 0 disables.
     postCloseReentryCooldownMinutes: u.postCloseReentryCooldownMinutes ?? 45,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
-    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    // Explicit null = stop-loss rule disabled (state.js + index.js rule 1 both null-guard);
+    // an absent key still falls back to the default.
+    stopLossPct:           ("stopLossPct" in u) ? u.stopLossPct : (u.emergencyPriceDropPct ?? -50),
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
