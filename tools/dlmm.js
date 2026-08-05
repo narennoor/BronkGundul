@@ -30,7 +30,7 @@ import { getWalletBalances, normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { getAndClearStagedSignals, peekStagedSignals } from "../signal-tracker.js";
-import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
+import { computePositions, fetchDlmmPnlForPool, isDepositPartiallyIndexed } from "./pnl.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -1559,11 +1559,16 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           ? Math.abs(reportedPnlPct - derivedPnlPct)
           : null;
         // Gate PnL rules ONLY when the tick is genuinely unpriceable (no real number
-        // from either method — e.g. missing deposits / data outage). Reported-vs-derived
-        // divergence is normal noise on volatile pools, so it is logged but NOT gated —
-        // gating on it froze all exits (stop-loss/trailing/close) and stranded positions.
-        const pnlPctSuspicious = reportedPnlPct == null && derivedPnlPct == null;
-        if (pnlPctSuspicious) {
+        // from either method — e.g. missing deposits / data outage) or when the datapi
+        // has indexed only part of a multi-tx wide deploy (understated cost basis →
+        // phantom PnL spike; JLY 5 Aug). Reported-vs-derived divergence is normal noise
+        // on volatile pools, so it is logged but NOT gated — gating on it froze all
+        // exits (stop-loss/trailing/close) and stranded positions.
+        const depositsPartial = isDepositPartiallyIndexed(binData, tracked?.amount_sol);
+        const pnlPctSuspicious = (reportedPnlPct == null && derivedPnlPct == null) || depositsPartial;
+        if (depositsPartial) {
+          log("positions_warn", `Partially indexed deposits for ${positionAddress.slice(0, 8)}: indexed=${binData?.allTimeDeposits?.total?.sol ?? "?"} SOL vs tracked=${tracked?.amount_sol} SOL — PnL rules paused this tick`);
+        } else if (pnlPctSuspicious) {
           log("positions_warn", `Unpriceable pnl_pct for ${positionAddress.slice(0, 8)}: no valid reported/derived value this tick — PnL rules paused`);
         } else if (pnlPctDiff != null && pnlPctDiff > (config.management.pnlSanityMaxDiffPct ?? 5)) {
           // Informational only — does not gate rules.

@@ -118,6 +118,23 @@ async function getLatestSig(conn, addr) {
 const hasDeposits = (d) =>
   safeNum(d?.allTimeDeposits?.total?.usd) > 0 || safeNum(d?.allTimeDeposits?.total?.sol) > 0;
 
+// A wide (multi-tx) deploy indexes into the datapi one tx at a time, so a fresh
+// position can report a real-but-PARTIAL deposit total — an understated cost
+// basis that reads as a large phantom PnL spike (JLY 5 Aug 2026: +31% tick 22s
+// after deploy armed the trailing TP, which fired on the "drop" back to reality
+// once the remaining chunks indexed). Deploys are single-side SOL and
+// state.json tracks the true amount (the partial-adoption path records the
+// actual on-chain amount), so the indexed SOL deposit total must cover the
+// tracked amount before a tick's PnL is trusted. The 0.9 ratio absorbs datapi
+// valuation noise while still catching any missing chunk (chunks are ≥~25%).
+export const DEPOSIT_COMPLETE_MIN_RATIO = 0.9;
+export function isDepositPartiallyIndexed(entry, trackedAmountSol) {
+  const expected = safeNum(trackedAmountSol);
+  if (expected <= 0) return false; // untracked position — nothing to verify against
+  const indexed = safeNum(entry?.allTimeDeposits?.total?.sol);
+  return indexed > 0 && indexed < expected * DEPOSIT_COMPLETE_MIN_RATIO;
+}
+
 async function getMeteoraData(conn, walletAddress, flat) {
   const ttlMs = Math.max(0, Number(config.pnl.depositCacheTtlSec ?? 300)) * 1000;
   // A fresh deploy isn't indexed by the datapi for a minute or two, so its
@@ -146,20 +163,28 @@ async function getMeteoraData(conn, walletAddress, flat) {
       data = cached.byPosition;
     } else {
       data = await fetchDlmmPnlForPool(pool, walletAddress);
-      // Meteora datapi occasionally serves an empty/zeroed 200. Deposits change
-      // only on our own txs, so the previous snapshot is still correct — backfill
-      // it instead of caching the bad response, which would suppress
+      // Meteora datapi occasionally serves an empty/zeroed 200, or (replica lag)
+      // a response with FEWER indexed deposits than we already saw. Deposits only
+      // ever grow on our own txs, so the previous snapshot is still correct —
+      // backfill it instead of caching the bad response, which would suppress
       // STOP_LOSS/TRAILING_TP (suspicious ticks) for a full TTL window.
       if (cached?.byPosition) {
         for (const addr of positionAddrs) {
           const prev = cached.byPosition[addr];
-          if (prev && hasDeposits(prev) && !hasDeposits(data[addr])) {
+          if (!prev || !hasDeposits(prev)) continue;
+          const prevSol = safeNum(prev.allTimeDeposits?.total?.sol);
+          const freshSol = safeNum(data[addr]?.allTimeDeposits?.total?.sol);
+          if (!hasDeposits(data[addr]) || freshSol < prevSol) {
             data[addr] = prev;
-            log("pnl_api", `Backfilled stale deposits for ${addr.slice(0, 8)} — fresh Meteora response was empty/zeroed`);
+            log("pnl_api", `Backfilled stale deposits for ${addr.slice(0, 8)} — fresh Meteora response was empty/zeroed/regressed`);
           }
         }
       }
-      const depositsIncomplete = positionAddrs.some((addr) => !hasDeposits(data[addr]));
+      // Partial multi-tx indexing counts as incomplete too — keep refetching on
+      // the short retry TTL until the indexed total covers the tracked deploy.
+      const depositsIncomplete = positionAddrs.some(
+        (addr) => !hasDeposits(data[addr]) || isDepositPartiallyIndexed(data[addr], getTrackedPosition(addr)?.amount_sol)
+      );
       _meteoraCache.set(pool, { at: Date.now(), byPosition: data, sigByPosition, depositsIncomplete });
     }
     for (const addr of positionAddrs) byPosition[addr] = data[addr] || null;
@@ -174,6 +199,7 @@ function mapEntries(map) {
 
 // ─── Build the shaped position object (matches getMyPositions output) ──
 function buildPosition(f, prices, solUsd, meteora, solMode) {
+  const tracked = getTrackedPosition(f.position);
   const priceX = f.baseMint ? (prices[f.baseMint] ?? 0) : 0;
 
   const xHuman = safeNum(f.xRaw) / 10 ** f.decX;
@@ -215,9 +241,12 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   const holdsTokenX = xHuman > 0 || feeXHuman > 0;
   const priceMissing = !(solUsd > 0) || (holdsTokenX && !!f.baseMint && !(priceX > 0));
   const depositsMissing = (solMode ? depositsSol : depositsUsd) <= 0;
-  const pnlPctSuspicious = priceMissing || depositsMissing;
+  // Partially indexed multi-tx deploy → understated cost basis → phantom PnL
+  // spike. Don't act on it (and don't let it raise the peak).
+  const depositsPartial = isDepositPartiallyIndexed(meteora, tracked?.amount_sol);
+  const pnlPctSuspicious = priceMissing || depositsMissing || depositsPartial;
   if (pnlPctSuspicious) {
-    log("pnl_warn", `${f.position.slice(0, 8)} suspicious tick — priceMissing=${priceMissing} depositsMissing=${depositsMissing} (solUsd=${solUsd}, priceX=${priceX})`);
+    log("pnl_warn", `${f.position.slice(0, 8)} suspicious tick — priceMissing=${priceMissing} depositsMissing=${depositsMissing} depositsPartial=${depositsPartial} (solUsd=${solUsd}, priceX=${priceX}, indexedSol=${depositsSol}, trackedSol=${tracked?.amount_sol ?? "?"})`);
   }
 
   const inRange = f.active != null && f.lower != null && f.upper != null
@@ -227,7 +256,6 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   if (inRange) markInRange(f.position);
   else markOutOfRange(f.position);
 
-  const tracked = getTrackedPosition(f.position);
   const ageFromState = tracked?.deployed_at
     ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
     : null;

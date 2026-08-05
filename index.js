@@ -262,7 +262,10 @@ export async function runManagementCycle({ silent = false } = {}) {
     // confirmation lives in the fast 3s poller below.
     const exitMap = new Map();
     for (const p of positionData) {
-      confirmPeak(p.position, p.pnl_pct, 1);
+      // Suspicious ticks (unpriced, or deposits only partially indexed after a
+      // multi-tx wide deploy) must never raise the peak — a phantom spike arms
+      // the trailing TP and fires on the "drop" back to reality (JLY 5 Aug).
+      if (!p.pnl_pct_suspicious) confirmPeak(p.position, p.pnl_pct, 1);
       const exit = updatePnlAndCheckExits(p.position, p, config.management);
       if (exit) {
         exitMap.set(p.position, exit.reason);
@@ -847,7 +850,8 @@ Summarize the current portfolio health, total fees earned, and performance of al
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions?.length) return;
       for (const p of result.positions) {
-        confirmPeak(p.position, p.pnl_pct, confirmTicks);
+        // Never feed suspicious ticks into peak tracking (see management cycle).
+        if (!p.pnl_pct_suspicious) confirmPeak(p.position, p.pnl_pct, confirmTicks);
 
         // Detect an exit signal this tick (rule-based exits, then deterministic close rules).
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
