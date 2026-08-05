@@ -493,7 +493,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
     }
 
-    // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
+    // Hard filters after token recon — block launchpads, excessive Jupiter bot holders,
+    // and top-10 holder concentration above maxTop10Pct
     const filteredOut = [];
     const passing = allCandidates.filter(({ pool, ti }) => {
       const launchpad = ti?.launchpad ?? null;
@@ -515,6 +516,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
       if (!botCheck.allowed) {
         log("screening", `Bot-holder filter: dropped ${pool.name} — ${botCheck.reason}`);
         filteredOut.push({ name: pool.name, reason: botCheck.reason });
+        return false;
+      }
+      const top10Pct = Number(ti?.audit?.top_holders_pct);
+      if (Number.isFinite(top10Pct) && config.screening.maxTop10Pct > 0 && top10Pct > config.screening.maxTop10Pct) {
+        log("screening", `Top10 filter: dropped ${pool.name} — top10 ${top10Pct}% > ${config.screening.maxTop10Pct}%`);
+        filteredOut.push({ name: pool.name, reason: `top10 concentration ${top10Pct}% above maximum ${config.screening.maxTop10Pct}%` });
         return false;
       }
       return true;
