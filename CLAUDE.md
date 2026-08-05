@@ -236,7 +236,16 @@ deployPosition()                   tools/dlmm.js
    ├─ strategy: spot | curve | bid_ask (config.strategy.strategy)
    ├─ range: bins_below linear in volatility, totalBins >= 35 (MIN_SAFE_BINS_BELOW)
    ├─ wide path: totalBins > 69 → createExtendedEmptyPosition + addLiquidityByStrategyChunkable
-   ├─ standard path: initializePositionAndAddLiquidityByStrategy
+   │    Chunk txs deposit at ACTIVE-BIN-RELATIVE deltas (rebalanceLiquidity) but only carry
+   │    the bin-array accounts of their planned chunk, so active-bin drift across a bin-array
+   │    edge fails that chunk (InvalidBinArray 6027) while earlier chunks stay live.
+   │    Mitigations: pool.refetchStates() before range planning (stale 5-min pool cache was
+   │    the drift source in the 5 Aug 2026 SISYPUSS partial deploy) + per-chunk failure
+   │    handling — 0 chunks landed → closePositionIfEmpty (reclaim rent) + clean failure;
+   │    ≥1 chunk landed → adopt the partial position: trackPosition with ACTUAL on-chain
+   │    amount/bins (read via pool.getPosition), a "Partial wide deploy" note, decision-log
+   │    summary marked PARTIAL, result carries partial+warning so the LLM narrates it.
+   ├─ standard path: initializePositionAndAddLiquidityByStrategy (absolute bins — no drift issue)
    └─ post: trackPosition({ signal_snapshot: getAndClearStagedSignals })
         appendDecision({ type: "deploy", actor: "SCREENER", metrics, risks, rejected })
         notifyDeploy (Telegram)   ── skip if live message active

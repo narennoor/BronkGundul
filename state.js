@@ -82,6 +82,7 @@ export function trackPosition({
   deploy_txs = [],
   base_mint = null,
   dry = false,
+  notes = [],
 }) {
   const state = load();
   state.positions[position] = {
@@ -123,7 +124,7 @@ export function trackPosition({
     rebalance_count: 0,
     closed: false,
     closed_at: null,
-    notes: [],
+    notes: Array.isArray(notes) ? notes.map((n) => sanitizeStoredText(n)) : [],
     peak_pnl_pct: 0,
     pending_peak_pnl_pct: null,
     pending_peak_confirm_count: 0,

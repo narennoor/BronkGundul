@@ -467,6 +467,46 @@ export function pickDeployStrategy(binsBelow) {
   };
 }
 
+// ─── Wide-path partial-deploy helpers ──────────────────────────
+
+// Best-effort close of a just-created position that never received liquidity,
+// so the (refundable) position rent comes back instead of stranding an
+// invisible empty position — empty positions never show in the portfolio API.
+async function closeEmptyWidePosition(pool, positionPubkey, wallet) {
+  try {
+    const tx = await pool.closePositionIfEmpty({
+      owner: wallet.publicKey,
+      position: { publicKey: positionPubkey },
+    });
+    const txs = Array.isArray(tx) ? tx : [tx];
+    for (const t of txs) {
+      await sendAndConfirmTransaction(getConnection(), t, [wallet]);
+    }
+    log("deploy", `Closed empty wide position ${positionPubkey.toString().slice(0, 8)} — rent reclaimed`);
+  } catch (error) {
+    log("deploy_error", `Could not close empty position ${positionPubkey.toString().slice(0, 8)}: ${error.message}. Close it manually to reclaim the rent.`);
+  }
+}
+
+// Read the actual on-chain balances/bin range of a partially filled position
+// straight from the position account (no indexer lag). Right after a deploy
+// there are no fees yet, so totalYAmount ≈ the SOL that actually landed.
+async function readDeployedPositionState(pool, positionPubkey) {
+  try {
+    const p = await pool.getPosition(positionPubkey);
+    const d = p?.positionData || {};
+    const y = d.totalYAmount != null ? Number(d.totalYAmount.toString()) / 1e9 : null;
+    return {
+      amount_sol: y != null && Number.isFinite(y) ? roundNum(y, 6) : null,
+      lower_bin: d.lowerBinId ?? null,
+      upper_bin: d.upperBinId ?? null,
+    };
+  } catch (error) {
+    log("deploy_warn", `Could not read partial position state for ${positionPubkey.toString().slice(0, 8)}: ${error.message}`);
+    return null;
+  }
+}
+
 // ─── Deploy Position ───────────────────────────────────────────
 export async function deployPosition({
   pool_address,
@@ -521,6 +561,14 @@ export async function deployPosition({
     log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
     return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
   }
+  // Refresh the cached lbPair snapshot before planning the range. Pool objects
+  // live in a 5-minute cache and getActiveBin() does NOT update pool.lbPair,
+  // while the SDK's wide-range add-liquidity (rebalanceLiquidity) anchors its
+  // deposit bins to pool.lbPair.activeId as active-bin-relative deltas. A stale
+  // anchor shifts the executed bins away from the planned (and pre-checked)
+  // range — 5 Aug 2026 SISYPUSS: a 4-bin shift pushed chunk 2 into a bin array
+  // absent from the tx account list → InvalidBinArray 6027, partial deploy.
+  await pool.refetchStates();
   const activeBin = await pool.getActiveBin();
   const actualBinStep = pool.lbPair.binStep;
   const activePrice = Number(getPriceOfBinByBinId(activeBin.binId, actualBinStep).toString());
@@ -915,6 +963,7 @@ export async function deployPosition({
 
   try {
     const txHashes = [];
+    let partialDeploy = null;
 
     if (isWideRange) {
       // ── Wide Range Path (>69 bins) ─────────────────────────────────
@@ -938,7 +987,13 @@ export async function deployPosition({
         log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
       }
 
-      // Phase 2: Add liquidity (may be multiple txs)
+      // Phase 2: Add liquidity (may be multiple txs). These txs deposit at
+      // active-bin-RELATIVE deltas (rebalanceLiquidity) with a program-side
+      // drift tolerance of ceil(slippage% / binStep%) bins, but each tx only
+      // carries the bin-array accounts of its planned chunk — active-bin drift
+      // across a bin-array edge fails that chunk (InvalidBinArray) while
+      // earlier chunks stay live on-chain. Handle per-chunk instead of letting
+      // one failed chunk discard the whole deploy as if nothing landed.
       const addTxs = await pool.addLiquidityByStrategyChunkable({
         positionPubKey: newPosition.publicKey,
         user: wallet.publicKey,
@@ -948,10 +1003,34 @@ export async function deployPosition({
         slippage: 10, // 10%
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
+      let executedChunks = 0;
       for (let i = 0; i < addTxArray.length; i++) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
-        txHashes.push(txHash);
-        log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
+        try {
+          const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
+          txHashes.push(txHash);
+          executedChunks++;
+          log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
+        } catch (chunkError) {
+          if (executedChunks === 0) {
+            // Nothing deposited — reclaim the position rent and fail cleanly.
+            await closeEmptyWidePosition(pool, newPosition.publicKey, wallet);
+            throw chunkError;
+          }
+          // A later chunk failed after liquidity landed: the position is live
+          // on-chain with a partial fill. Adopt it deliberately — an untracked
+          // position is only half-managed (no deployed_at/age, no OOR timer,
+          // no trailing TP; it would only surface via the on-chain scan).
+          partialDeploy = {
+            failed_chunk: i + 1,
+            total_chunks: addTxArray.length,
+            error: chunkError.message,
+          };
+          log(
+            "deploy_warn",
+            `Add liquidity tx ${i + 1}/${addTxArray.length} failed after ${executedChunks} chunk(s) landed — adopting partial position: ${chunkError.message}`,
+          );
+          break;
+        }
       }
     } else {
       // ── Standard Path (≤69 bins) ─────────────────────────────────
@@ -967,7 +1046,25 @@ export async function deployPosition({
       txHashes.push(txHash);
     }
 
-    log("deploy", `SUCCESS — ${txHashes.length} tx(s): ${txHashes[0]}`);
+    // Partial fill: read the actual deposit + bin range from the position
+    // account so state.json reflects what really landed, not the plan.
+    let actualAmountY = finalAmountY;
+    let actualBinMin = minBinId;
+    let actualBinMax = maxBinId;
+    if (partialDeploy) {
+      const actual = await readDeployedPositionState(pool, newPosition.publicKey);
+      if (actual?.amount_sol != null) actualAmountY = actual.amount_sol;
+      if (actual?.lower_bin != null) actualBinMin = actual.lower_bin;
+      if (actual?.upper_bin != null) actualBinMax = actual.upper_bin;
+      partialDeploy.planned_sol = finalAmountY;
+      partialDeploy.deposited_sol = actual?.amount_sol ?? null;
+      log(
+        "deploy_warn",
+        `PARTIAL deploy tracked — ~${actualAmountY} of ${finalAmountY} SOL landed, bins ${actualBinMin}->${actualBinMax}`,
+      );
+    }
+
+    log("deploy", `${partialDeploy ? "PARTIAL SUCCESS" : "SUCCESS"} — ${txHashes.length} tx(s): ${txHashes[0]}`);
 
     _positionsCacheAt = 0;
     const signalSnapshot = config.darwin?.enabled
@@ -980,14 +1077,14 @@ export async function deployPosition({
       base_mint: baseMint,
       strategy: activeStrategy,
       strategy_source: strategySource,
-      bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
+      bin_range: { min: actualBinMin, max: actualBinMax, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
       bin_step: bin_step ?? actualBinStep,
       base_fee: actualBaseFee,
       sw_size_boosted: swSizeBoosted,
       volatility: normalizedVolatility,
       fee_tvl_ratio,
       organic_score,
-      amount_sol: finalAmountY,
+      amount_sol: actualAmountY,
       amount_x: finalAmountX,
       active_bin: activeBin.binId,
       initial_value_usd,
@@ -1000,6 +1097,9 @@ export async function deployPosition({
       entry_fee_tvl_slow,
       fee_gate_timeframe,
       deploy_txs: txHashes,
+      notes: partialDeploy
+        ? [`Partial wide deploy: add-liquidity chunk ${partialDeploy.failed_chunk}/${partialDeploy.total_chunks} failed; ~${actualAmountY} of planned ${finalAmountY} SOL landed`]
+        : [],
     });
 
     appendDecision({
@@ -1008,9 +1108,12 @@ export async function deployPosition({
       pool: pool_address,
       pool_name,
       position: newPosition.publicKey.toString(),
-      summary: `Deployed ${finalAmountY} SOL with ${activeStrategy}`,
+      summary: partialDeploy
+        ? `PARTIAL deploy: ~${actualAmountY} of ${finalAmountY} SOL with ${activeStrategy} (chunk ${partialDeploy.failed_chunk}/${partialDeploy.total_chunks} failed)`
+        : `Deployed ${finalAmountY} SOL with ${activeStrategy}`,
       reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
       risks: [
+        partialDeploy ? `partial fill — actual bins ${actualBinMin}→${actualBinMax}` : null,
         normalizedVolatility != null ? `volatility ${normalizedVolatility}` : null,
         fee_tvl_ratio != null ? `fee/TVL ${fee_tvl_ratio}%` : null,
       ].filter(Boolean),
@@ -1030,7 +1133,7 @@ export async function deployPosition({
       position: newPosition.publicKey.toString(),
       pool: pool_address,
       pool_name,
-      bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+      bin_range: { min: actualBinMin, max: actualBinMax, active: activeBin.binId },
       price_range: { min: minPrice, max: maxPrice },
       range_coverage: {
         downside_pct: downsideCoveragePct,
@@ -1045,7 +1148,11 @@ export async function deployPosition({
       strategy_source: strategySource,
       wide_range: isWideRange,
       amount_x: finalAmountX,
-      amount_y: finalAmountY,
+      amount_y: actualAmountY,
+      partial: partialDeploy,
+      ...(partialDeploy
+        ? { warning: `Partial deploy: only ~${actualAmountY} of the planned ${finalAmountY} SOL landed (chunk ${partialDeploy.failed_chunk}/${partialDeploy.total_chunks} failed: ${String(partialDeploy.error).slice(0, 160)}). Position is tracked with actual amounts — do NOT retry the deploy.` }
+        : {}),
       txs: txHashes,
     };
   } catch (error) {
