@@ -383,15 +383,21 @@ export function getTrailingTrace(position_address, trailingDropPct = null) {
   const last = samples.length ? samples[samples.length - 1] : null;
   const prev = samples.length > 1 ? samples[samples.length - 2] : null;
   const peak = pos.peak_pnl_pct ?? null;
-  const dropObserved = (peak != null && last?.p != null) ? peak - last.p : null;
   const armedAtMs = pos.trailing_armed_at ? Date.parse(pos.trailing_armed_at) : null;
+  // Drop/overshoot only mean something for a position that actually armed
+  // trailing. On a low-yield or OOR close, peak is 0 and the arithmetic yields a
+  // spurious "overshoot" of -trailingDropPct on every single record — which
+  // would quietly poison any average taken over the field at review time.
+  const dropObserved = (pos.trailing_active && peak != null && last?.p != null)
+    ? peak - last.p
+    : null;
 
   return {
     trailing_active: !!pos.trailing_active,
     trailing_armed_at: pos.trailing_armed_at ?? null,
     trailing_armed_peak_pct: pos.trailing_armed_peak_pct ?? null,
-    trailing_peak_pct: peak,
-    trailing_exit_pnl_pct: last?.p ?? null,
+    trailing_peak_pct: pos.trailing_active ? peak : null,
+    trailing_exit_pnl_pct: pos.trailing_active ? (last?.p ?? null) : null,
     trailing_drop_observed_pct: dropObserved != null ? Math.round(dropObserved * 100) / 100 : null,
     trailing_overshoot_pct: (dropObserved != null && trailingDropPct != null)
       ? Math.round((dropObserved - trailingDropPct) * 100) / 100

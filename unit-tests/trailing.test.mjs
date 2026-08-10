@@ -80,7 +80,7 @@ test("a suspicious tick never enters the trace (same rule as peak tracking)", ()
   assert.deepEqual(trace.trailing_samples.map((s) => s.p), [1.3]);
 });
 
-test("a close that never armed trailing carries no sample payload", () => {
+test("a close that never armed trailing carries no sample payload and no drop numbers", () => {
   const pos = freshPosition();
   tick(pos, 0.4);
   tick(pos, 0.7);
@@ -89,6 +89,13 @@ test("a close that never armed trailing carries no sample payload", () => {
   assert.equal(trace.trailing_active, false);
   assert.deepEqual(trace.trailing_samples, [], "keeps lessons.json lean — nothing to explain here");
   assert.equal(trace.trailing_sample_count, 2, "the buffer itself still exists in state");
+  // A low-yield/OOR close has peak 0, and peak - current would report a
+  // spurious overshoot of -trailingDropPct on every record, poisoning any
+  // average taken over the field.
+  assert.equal(trace.trailing_peak_pct, null);
+  assert.equal(trace.trailing_exit_pnl_pct, null);
+  assert.equal(trace.trailing_drop_observed_pct, null);
+  assert.equal(trace.trailing_overshoot_pct, null);
 });
 
 test("trailing arms at the peak and stamps trailing_armed_at", () => {
