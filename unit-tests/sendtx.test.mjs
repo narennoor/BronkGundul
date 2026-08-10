@@ -92,10 +92,38 @@ test("(a) prepends ComputeBudget limit + price instructions", async () => {
   assert.equal(tx.instructions[1].data.readBigUInt64LE(1), 90_000n);
 });
 
-test("(a2) a tx that already carries a compute budget is left alone", async () => {
+test("(a2) an SDK tx that already sets a CU LIMIT still gets a priority fee", async () => {
+  // The regression this pins down: every Meteora SDK tx ships its own
+  // SetComputeUnitLimit (162 299 on a claim burning 112k CU) and no price. A
+  // blanket "already has a compute budget → leave it alone" check skipped the
+  // priority fee on every real tx — the first live close after deploy paid
+  // 5000 lamports, base fee only.
   const payer = Keypair.generate();
   const tx = buildTx(payer);
-  tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitLimit({ units: 123_456 }));
+  tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitLimit({ units: 162_299 }));
+  const conn = mockConnection({ fees: [40_000, 70_000] });
+
+  await sendTx(tx, [payer], { label: "close_claim", connection: conn, cuLimit: 300_000, ...fast });
+
+  const budgetIxs = tx.instructions.filter(
+    (ix) => ix.programId.toString() === ComputeBudgetProgram.programId.toString(),
+  );
+  assert.equal(budgetIxs.length, 2, "the price instruction must be added on top of the SDK's limit");
+  const kinds = budgetIxs.map((ix) => ix.data[0]).sort();
+  assert.deepEqual(kinds, [2, 3], "one SetComputeUnitLimit (2) + one SetComputeUnitPrice (3)");
+  assert.equal(conn.calls.feeQueries, 1);
+  // The SDK's own limit is measured against its own instruction set — keep it.
+  const limitIx = budgetIxs.find((ix) => ix.data[0] === 2);
+  assert.equal(limitIx.data.readUInt32LE(1), 162_299, "our 300k default must not override the SDK's fitted limit");
+});
+
+test("(a3) a tx that already sets a PRICE is left alone", async () => {
+  const payer = Keypair.generate();
+  const tx = buildTx(payer);
+  tx.instructions.unshift(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 111_111 }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 12_345 }),
+  );
   const conn = mockConnection();
 
   await sendTx(tx, [payer], { label: "t", connection: conn, ...fast });
@@ -103,8 +131,8 @@ test("(a2) a tx that already carries a compute budget is left alone", async () =
   const budgetIxs = tx.instructions.filter(
     (ix) => ix.programId.toString() === ComputeBudgetProgram.programId.toString(),
   );
-  assert.equal(budgetIxs.length, 1, "no second budget instruction added");
-  assert.equal(conn.calls.feeQueries, 0, "no fee lookup when the caller set its own budget");
+  assert.equal(budgetIxs.length, 2, "nothing added — both kinds already present");
+  assert.equal(conn.calls.feeQueries, 0, "no fee lookup when the price is already set");
 });
 
 test("(b) rebroadcasts until the blockhash dies, never using RPC-side retries", async () => {

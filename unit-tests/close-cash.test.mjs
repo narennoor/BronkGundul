@@ -76,6 +76,7 @@ test("the Meteora cross-check catches the three-SOL hole (7 Aug)", () => {
   });
   assert.equal(verdict.mismatch_sol, -2.9176);
   assert.equal(verdict.over_tolerance, true, "cash_complete must become false, not true");
+  assert.equal(verdict.direction, "shortfall");
 });
 
 test("an ordinary close with swap slippage stays inside tolerance", () => {
@@ -91,10 +92,37 @@ test("an ordinary close with swap slippage stays inside tolerance", () => {
   assert.equal(verdict.tolerance_sol, 0.02);
 });
 
+test("the rent refund is not a hole — surplus within rent size passes", () => {
+  // KET-SOL, 10 Aug, the first close after the era #9 fix: deposit 2.5200,
+  // Meteora withdrawals 2.519994, wallet got 2.628831 back. The +0.108837
+  // surplus is the 135-bin position account's rent, which Meteora's
+  // withdrawals_sol does not count. sol_cycle_net reconciled to -0.000047 SOL.
+  const verdict = evaluateCashMismatch({
+    inflowSol: 2.628831206,
+    withdrawalsSol: 2.519994294,
+    depositBasisSol: 2.519996632,
+    tolerancePct: 1,
+  });
+  assert.equal(verdict.mismatch_sol, 0.108836912);
+  assert.equal(verdict.over_tolerance, false, "a rent-sized surplus must NOT clear cash_complete");
+  assert.equal(verdict.direction, null);
+});
+
+test("a surplus too large for rent is still flagged", () => {
+  const verdict = evaluateCashMismatch({
+    inflowSol: 3.2,
+    withdrawalsSol: 2.5,
+    depositBasisSol: 2.5,
+    tolerancePct: 1,
+  });
+  assert.equal(verdict.over_tolerance, true);
+  assert.equal(verdict.direction, "surplus");
+});
+
 test("no Meteora figure available → no verdict, never a false alarm", () => {
   assert.deepEqual(
     evaluateCashMismatch({ inflowSol: 1, withdrawalsSol: null, depositBasisSol: 2 }),
-    { mismatch_sol: null, over_tolerance: false, tolerance_sol: null },
+    { mismatch_sol: null, over_tolerance: false, tolerance_sol: null, direction: null },
   );
   assert.equal(evaluateCashMismatch({ inflowSol: 1, withdrawalsSol: 2, depositBasisSol: 0 }).over_tolerance, false);
 });

@@ -923,7 +923,9 @@ export async function executeTool(name, args) {
                     // Positions deployed before deploy_txs existed have no
                     // outflow to measure — expected once, not a fault.
                     const why = cash.cash_mismatch_over_tolerance
-                      ? `selisih ${cash.cash_mismatch_sol} SOL vs withdrawals Meteora (>${cash.cash_mismatch_tolerance_pct}% deposit) — ada signature close yang hilang`
+                      ? (cash.cash_mismatch_direction === "shortfall"
+                        ? `kurang ${Math.abs(cash.cash_mismatch_sol)} SOL vs withdrawals Meteora (>${cash.cash_mismatch_tolerance_pct}% deposit) — ada signature close yang hilang`
+                        : `lebih ${cash.cash_mismatch_sol} SOL vs withdrawals Meteora — di luar yang bisa dijelaskan refund rent`)
                       : deployTxs.length
                         ? `${cash.cash_txs_missing} tx tak terbaca`
                         : "posisi lama, deploy_txs belum terekam";

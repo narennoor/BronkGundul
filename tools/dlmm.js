@@ -182,10 +182,24 @@ export async function resolvePriorityFee(connection, writableAccounts = []) {
   }
 }
 
-function hasComputeBudgetIx(tx) {
-  return (tx?.instructions || []).some(
-    (ix) => ix?.programId?.toString?.() === ComputeBudgetProgram.programId.toString(),
-  );
+// Which compute-budget instructions a tx ALREADY carries, by opcode
+// (2 = SetComputeUnitLimit, 3 = SetComputeUnitPrice).
+//
+// This has to be per-kind, not "does it have any". The Meteora SDK ships a
+// well-fitted SetComputeUnitLimit of its own (162 299 on a claim that burns
+// 112k CU) but never a price, so a blanket "already has a budget → leave it
+// alone" check silently skipped the priority fee on every SDK tx — which is the
+// entire point of this helper. Caught on the first live close after deploy:
+// `fee 0 µLamports/CU (preset)`, 5000 lamports paid, i.e. base fee only.
+function computeBudgetKinds(tx) {
+  const kinds = new Set();
+  for (const ix of tx?.instructions || []) {
+    if (ix?.programId?.toString?.() !== ComputeBudgetProgram.programId.toString()) continue;
+    const op = ix.data?.[0];
+    if (op === 2) kinds.add("limit");
+    else if (op === 3) kinds.add("price");
+  }
+  return kinds;
 }
 
 function isAlreadyProcessed(error) {
@@ -230,20 +244,25 @@ export async function sendTx(tx, signers, opts = {}) {
   const intervalMs = Math.max(50, Number(opts.rebroadcastIntervalMs ?? config.tx.rebroadcastIntervalMs));
   const units = Number(cuLimit ?? config.tx.computeUnitLimit);
 
-  let fee = { micro: 0, source: "preset" };
-  if (!hasComputeBudgetIx(tx)) {
+  const existingBudget = computeBudgetKinds(tx);
+  const budgetIxs = [];
+  // The SDK's own limit is measured against its own instruction set — trust it
+  // over our per-call-site default whenever it is there.
+  let appliedLimit = existingBudget.has("limit") ? "sdk" : null;
+  if (!existingBudget.has("limit") && Number.isFinite(units) && units > 0) {
+    appliedLimit = Math.round(units);
+    budgetIxs.push(ComputeBudgetProgram.setComputeUnitLimit({ units: appliedLimit }));
+  }
+  let fee = { micro: 0, source: "sdk" };
+  if (!existingBudget.has("price")) {
     fee = priorityMicroLamports != null
       ? { micro: clampPriorityFee(priorityMicroLamports), source: "explicit" }
       : await resolvePriorityFee(conn, writableAccounts);
-    const budgetIxs = [];
-    if (Number.isFinite(units) && units > 0) {
-      budgetIxs.push(ComputeBudgetProgram.setComputeUnitLimit({ units: Math.round(units) }));
-    }
     if (fee.micro > 0) {
       budgetIxs.push(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: fee.micro }));
     }
-    if (budgetIxs.length) tx.instructions.unshift(...budgetIxs);
   }
+  if (budgetIxs.length) tx.instructions.unshift(...budgetIxs);
 
   const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash(commitment);
   tx.recentBlockhash = blockhash;
@@ -315,7 +334,7 @@ export async function sendTx(tx, signers, opts = {}) {
   if (result?.ok && !result.value?.err) {
     log(
       "tx",
-      `${label} confirmed in ${elapsedMs}ms — fee ${fee.micro} µLamports/CU (${fee.source}), cu_limit ${units}, ${rebroadcasts} rebroadcast(s): ${signature}`,
+      `${label} confirmed in ${elapsedMs}ms — fee ${fee.micro} µLamports/CU (${fee.source}), cu_limit ${appliedLimit}, ${rebroadcasts} rebroadcast(s): ${signature}`,
     );
     return signature;
   }

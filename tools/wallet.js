@@ -206,22 +206,39 @@ async function partitionLandedSignatures(signatures) {
  * with Meteora's own settled withdrawals by more than slippage can explain.
  *
  * Pure arithmetic, exported so it can be unit-tested without an RPC.
- * `inflowSol` = sol_in_close + sol_in_swap. A negative mismatch means we
- * measured LESS than Meteora recorded, i.e. close signatures are missing from
- * our ledger — the era #9 failure mode.
+ * `inflowSol` = sol_in_close + sol_in_swap.
+ *
+ * The check is ASYMMETRIC on purpose, and the two directions mean different
+ * things:
+ *
+ *  - **Negative** (we measured LESS than Meteora withdrew) is the era #9 failure
+ *    mode: close signatures missing from our ledger. Anything past the tolerance
+ *    is a fault.
+ *  - **Positive** (we measured MORE) is normal and expected: closing a position
+ *    refunds its account rent to the wallet, and Meteora's `withdrawals_sol`
+ *    counts liquidity only. A 135-bin position holds ~0.109 SOL of rent — 4.3%
+ *    of a 2.5 SOL deposit, i.e. four times the 1% tolerance. The first live
+ *    close after the era #9 fix (KET-SOL, 10 Aug) flagged exactly that and was
+ *    perfectly reconciled. Allow rent-sized surpluses; flag only what rent
+ *    cannot explain.
  */
+export const MAX_RENT_REFUND_SOL = 0.25;
+
 export function evaluateCashMismatch({ inflowSol, withdrawalsSol, depositBasisSol, tolerancePct = 1 }) {
   const withdrawals = withdrawalsSol == null ? NaN : Number(withdrawalsSol);
   const basis = Math.abs(Number(depositBasisSol) || 0);
   if (!Number.isFinite(withdrawals) || basis <= 0) {
-    return { mismatch_sol: null, over_tolerance: false, tolerance_sol: null };
+    return { mismatch_sol: null, over_tolerance: false, tolerance_sol: null, direction: null };
   }
   const mismatch = Math.round((Number(inflowSol || 0) - withdrawals) * 1e9) / 1e9;
   const toleranceSol = (basis * Number(tolerancePct || 0)) / 100;
+  const shortfall = mismatch < -toleranceSol;
+  const unexplainedSurplus = mismatch > toleranceSol + MAX_RENT_REFUND_SOL;
   return {
     mismatch_sol: mismatch,
     tolerance_sol: Math.round(toleranceSol * 1e9) / 1e9,
-    over_tolerance: Math.abs(mismatch) > toleranceSol,
+    over_tolerance: shortfall || unexplainedSurplus,
+    direction: shortfall ? "shortfall" : unexplainedSurplus ? "surplus" : null,
   };
 }
 
@@ -270,7 +287,11 @@ export async function reconcileCycleCash({
   // than a slippage-sized fraction of the deposit means signatures are missing,
   // not that the money is.
   const tolerancePct = Number(config.tx?.cashMismatchTolerancePct ?? 1);
-  const { mismatch_sol: mismatchSol, over_tolerance: mismatchOverTolerance } = evaluateCashMismatch({
+  const {
+    mismatch_sol: mismatchSol,
+    over_tolerance: mismatchOverTolerance,
+    direction: mismatchDirection,
+  } = evaluateCashMismatch({
     inflowSol: close.sol + swap.sol,
     withdrawalsSol: withdrawals_sol,
     depositBasisSol: Math.abs(Number(deposits_sol) || 0) || Math.abs(deploy.sol),
@@ -287,9 +308,12 @@ export async function reconcileCycleCash({
     cash_txs_found: deploy.found + claim.found + close.found + swap.found,
     cash_txs_missing: missing,
     cash_txs_never_landed: claimSet.neverLanded.length + closeSet.neverLanded.length,
-    // Signed gap vs Meteora: negative = we measured LESS coming back than Meteora
-    // says was withdrawn, i.e. close signatures are missing from our ledger.
+    // Signed gap vs Meteora. Negative = we measured LESS coming back than
+    // Meteora says was withdrawn (missing close signatures). A small positive
+    // gap is the position-account rent refund and is expected — see
+    // evaluateCashMismatch.
     cash_mismatch_sol: mismatchSol,
+    cash_mismatch_direction: mismatchDirection,
     cash_mismatch_tolerance_pct: tolerancePct,
     // Any unresolved signature — or a cross-check that fails — makes the totals
     // incomplete. Never let a partial sum pass as a real shortfall.
