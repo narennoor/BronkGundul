@@ -308,8 +308,12 @@ export async function recheckCash({ positions = [], lookbackHours = 168, dryRun 
     const result = results.get(entry.position);
     if (!result || entry.recorded_at !== result.recorded_at) continue;
     const previous = entry.exit_execution || {};
+    // A rescan supersedes whatever the live cross-check concluded, so its
+    // verdict fields must not survive as stale leftovers next to fresh numbers.
+    const { cash_mismatch_sol, cash_mismatch_direction, cash_mismatch_over_tolerance,
+            cash_mismatch_tolerance_pct, ...carried } = previous;
     entry.exit_execution = {
-      ...previous,
+      ...carried,
       ...result.cash,
       pre_recheck_cash: previous.pre_recheck_cash || {
         sol_out_deploy: previous.sol_out_deploy ?? null,
@@ -317,6 +321,7 @@ export async function recheckCash({ positions = [], lookbackHours = 168, dryRun 
         sol_in_swap: previous.sol_in_swap ?? null,
         sol_cycle_net: previous.sol_cycle_net ?? null,
         cash_complete: previous.cash_complete ?? null,
+        cash_mismatch_sol: cash_mismatch_sol ?? null,
       },
     };
     patches.push({
