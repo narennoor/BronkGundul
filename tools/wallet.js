@@ -202,6 +202,22 @@ async function partitionLandedSignatures(signatures) {
 }
 
 /**
+ * Assign each signature to exactly one bucket: the first list that contains it
+ * keeps it, later lists drop it. Pass buckets in attribution order
+ * (deploy, claim, close, swap).
+ *
+ * Exported for tests. Pure.
+ */
+export function dedupeCycleBuckets(buckets) {
+  const seen = new Set();
+  return buckets.map((list) => (list || []).filter((sig) => {
+    if (!sig || seen.has(sig)) return false;
+    seen.add(sig);
+    return true;
+  }));
+}
+
+/**
  * Decide whether our on-chain measurement of the money coming back disagrees
  * with Meteora's own settled withdrawals by more than slippage can explain.
  *
@@ -269,11 +285,26 @@ export async function reconcileCycleCash({
     partitionLandedSignatures(close_txs),
   ]);
 
+  // Buckets OVERLAP by construction: state.close_tx_attempts is one ledger for
+  // the whole close path, claim signatures included, and the caller passes that
+  // union as close_txs while still passing claim_txs separately. Measuring each
+  // bucket independently would count those signatures twice — caught on the
+  // first live close (KET-SOL 10 Aug: -0.0000473 vs -0.0000398 SOL, the gap
+  // being exactly sol_in_claim). Harmless when a claim only burns gas, not when
+  // it actually returns SOL fees. First bucket to claim a signature owns it;
+  // the order below is the semantically correct attribution.
+  const [deployList, claimList, closeList, swapList] = dedupeCycleBuckets([
+    deploy_txs,
+    claimSet.landed,
+    closeSet.landed,
+    swap_tx ? [swap_tx] : [],
+  ]);
+
   const [deploy, claim, close, swap] = await Promise.all([
-    walletSolDelta(deploy_txs),
-    walletSolDelta(claimSet.landed),
-    walletSolDelta(closeSet.landed),
-    walletSolDelta(swap_tx ? [swap_tx] : []),
+    walletSolDelta(deployList),
+    walletSolDelta(claimList),
+    walletSolDelta(closeList),
+    walletSolDelta(swapList),
   ]);
   const missing = deploy.missing + claim.missing + close.missing + swap.missing;
 

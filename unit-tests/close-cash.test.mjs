@@ -19,7 +19,7 @@ const STATE_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..",
 const backup = fs.existsSync(STATE_FILE) ? fs.readFileSync(STATE_FILE) : null;
 
 const { trackPosition, recordCloseTxAttempt, getCloseTxAttempts } = await import("../state.js");
-const { evaluateCashMismatch } = await import("../tools/wallet.js");
+const { evaluateCashMismatch, dedupeCycleBuckets } = await import("../tools/wallet.js");
 
 const POS = "UNITTESTclose1111111111111111111111111111111";
 
@@ -62,6 +62,31 @@ test("attempts are deduplicated and survive repeated recording", () => {
   recordCloseTxAttempt(POS, "closeTx3");
   recordCloseTxAttempt(POS, null);
   assert.deepEqual(getCloseTxAttempts(POS), ["closeTx1", "closeTx2", "closeTx3"]);
+});
+
+test("a claim signature carried in both buckets is measured once, not twice", () => {
+  // close_tx_attempts is ONE ledger for the whole close path, so the union the
+  // executor passes as close_txs already contains the claim signatures that are
+  // also passed as claim_txs. Measuring both buckets naively double-counted them
+  // (KET-SOL 10 Aug: sol_cycle_net -0.0000473 instead of -0.0000398, the gap
+  // being exactly sol_in_claim). Only gas there; a claim that returns real SOL
+  // fees would inflate the whole cycle.
+  const [deploy, claim, close, swap] = dedupeCycleBuckets([
+    ["deploy1", "deploy2"],
+    ["claimA", "claimB"],
+    ["claimA", "claimB", "removeA", "removeB"], // the union, claims included
+    ["swap1"],
+  ]);
+
+  assert.deepEqual(deploy, ["deploy1", "deploy2"]);
+  assert.deepEqual(claim, ["claimA", "claimB"], "claims stay attributed to the claim bucket");
+  assert.deepEqual(close, ["removeA", "removeB"], "the close bucket drops what claim already owns");
+  assert.deepEqual(swap, ["swap1"]);
+});
+
+test("bucket dedup tolerates empty and null entries", () => {
+  assert.deepEqual(dedupeCycleBuckets([null, ["a", null, "a"], undefined, ["a", "b"]]),
+    [[], ["a"], [], ["b"]]);
 });
 
 test("the Meteora cross-check catches the three-SOL hole (7 Aug)", () => {
