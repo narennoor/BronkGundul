@@ -13,7 +13,7 @@ import {
 } from "./dlmm.js";
 import { getWalletBalances, swapToken, normalizeMint, reconcileCycleCash } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
-import { addLesson, attachExitExecution, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
+import { addLesson, attachExitExecution, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceEntry, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
 import { setPositionInstruction, getTrackedPosition } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
@@ -457,7 +457,16 @@ const toolMap = {
       trailingTakeProfit: ["management", "trailingTakeProfit"],
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
+      trailingBreakevenFloorPct: ["management", "trailingBreakevenFloorPct"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
+      // tx submission (priority fee + rebroadcast)
+      txPriorityFeeMicroLamports: ["tx", "priorityFeeMicroLamports"],
+      txPriorityFeeFloor: ["tx", "priorityFeeFloor"],
+      txPriorityFeeCap: ["tx", "priorityFeeCap"],
+      txConfirmTimeoutMs: ["tx", "confirmTimeoutMs"],
+      txRebroadcastIntervalMs: ["tx", "rebroadcastIntervalMs"],
+      txComputeUnitLimit: ["tx", "computeUnitLimit"],
+      txCashMismatchTolerancePct: ["tx", "cashMismatchTolerancePct"],
       // pnl poller
       pnlConfirmTicks: ["pnl", "confirmTicks"],
       pnlTakeProfitConfirmSec: ["pnl", "takeProfitConfirmSec"],
@@ -886,21 +895,38 @@ export async function executeTool(name, args) {
               // the signatures to be queryable, which can lag a beat, and nothing
               // downstream waits on it. Deploy signatures come from state.json —
               // recorded at deploy time, never inferred from a timestamp window.
-              const deployTxs = getTrackedPosition(posAddr)?.deploy_txs || [];
+              const trackedPos = getTrackedPosition(posAddr);
+              const deployTxs = trackedPos?.deploy_txs || [];
+              // Union of what THIS call returned and every close/claim signature
+              // ever submitted for the position (state.close_tx_attempts). A close
+              // that timed out and was retried reports only the retry's signature;
+              // the txs that landed on the first attempt live in state alone, and
+              // leaving them out is what booked -8.3 SOL of phantom losses in era #9.
+              const closeTxs = [...new Set([
+                ...(result.close_txs || []),
+                ...(result.close_tx_attempts || []),
+                ...(trackedPos?.close_tx_attempts || []),
+              ])];
+              // Meteora's own settled numbers, for the independent cross-check.
+              const perfEntry = getPerformanceEntry(posAddr);
               void reconcileCycleCash({
                 deploy_txs: deployTxs,
                 claim_txs: result.claim_txs || [],
-                close_txs: result.close_txs || [],
+                close_txs: closeTxs,
                 swap_tx: swapResult?.tx ?? null,
+                withdrawals_sol: perfEntry?.withdrawals_sol ?? null,
+                deposits_sol: perfEntry?.deposits_sol ?? trackedPos?.amount_sol ?? null,
               })
                 .then((cash) => {
                   attachExitExecution(posAddr, cash);
                   if (!cash.cash_complete) {
                     // Positions deployed before deploy_txs existed have no
                     // outflow to measure — expected once, not a fault.
-                    const why = deployTxs.length
-                      ? `${cash.cash_txs_missing} tx tak terbaca`
-                      : "posisi lama, deploy_txs belum terekam";
+                    const why = cash.cash_mismatch_over_tolerance
+                      ? `selisih ${cash.cash_mismatch_sol} SOL vs withdrawals Meteora (>${cash.cash_mismatch_tolerance_pct}% deposit) — ada signature close yang hilang`
+                      : deployTxs.length
+                        ? `${cash.cash_txs_missing} tx tak terbaca`
+                        : "posisi lama, deploy_txs belum terekam";
                     log("executor_warn", `Cash recon incomplete for ${posAddr.slice(0, 8)}: ${why}`);
                   }
                 })

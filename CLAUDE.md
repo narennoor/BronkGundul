@@ -90,9 +90,9 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
 | **Tools layer** | | |
 | `tools/definitions.js` | 1124 | OpenAI-format tool schemas. **Source of truth for what the LLM sees.** All 40+ tool names listed. |
 | `tools/executor.js` | 844 | `executeTool(name, args)`. Pre-flight safety checks for `PROTECTED_TOOLS = {deploy, claim, close, swap, self_update}`. Validates pool thresholds via fresh pool discovery call before deploy. Post-tool side-effects: telegram notifications, pool-memory auto-annotation on `low yield` close, auto-swap base→SOL on close. |
-| `tools/dlmm.js` | huge | Meteora DLMM SDK wrapper. **Lazy-loads** `@meteora-ag/dlmm` to avoid CJS-import-time crash in DRY_RUN/test. Pool cache (5 min), metadata cache (15 min), positions cache (5 min TTL + inflight dedup). `deployPosition`, `getMyPositions`, `getPositionPnl`, `getActiveBin`, `closePosition`, `claimFees`, `searchPools`, `getWalletPositions`, `addLiquidity`, `withdrawLiquidity`. Also has relay-mode (zap-in via LPAgent) and wide-range path (multi-tx `createExtendedEmptyPosition` + `addLiquidityByStrategyChunkable` for >69 bin ranges). Asserts Meteora bin-array initialization rent never charged. |
+| `tools/dlmm.js` | huge | Meteora DLMM SDK wrapper. **Lazy-loads** `@meteora-ag/dlmm` to avoid CJS-import-time crash in DRY_RUN/test. Pool cache (5 min), metadata cache (15 min), positions cache (5 min TTL + inflight dedup). `deployPosition`, `getMyPositions`, `getPositionPnl`, `getActiveBin`, `closePosition`, `claimFees`, `searchPools`, `getWalletPositions`, `addLiquidity`, `withdrawLiquidity`. Also has relay-mode (zap-in via LPAgent) and wide-range path (multi-tx `createExtendedEmptyPosition` + `addLiquidityByStrategyChunkable` for >69 bin ranges). Asserts Meteora bin-array initialization rent never charged. **All on-chain writes go through `sendTx()`** — see § Transaction submission. |
 | `tools/screening.js` | 950+ | `discoverPools`, `getTopCandidates` (hard filter + enrich + score), `getPoolDetail`. Scoring = `fee_tvl*500 + organic*10 + vol/100 + holders/100`. Has Discord signal merge/only modes, GMGN trending merge (`useGmgnTrending` — token-first: GMGN `/v1/market/rank` mints resolved to their top-TVL DLMM pool via `dlmm.datapi.meteora.ag`, then re-fetched from pool discovery so downstream filters apply unchanged), Jupiter trending merge (`useJupTrending` — same token-first contract, mints from `datapi.jup.ag/v1/pools/{toptrending,toptraded}/{interval}`, no API key, cached in `tools/jupiter-trending.js`), DexScreener boosts merge (`useDexScreener` — same contract, mints from `api.dexscreener.com/token-boosts/{top,latest}/v1` filtered to solana; boosts are paid promotion so candidates rely on the hard filters; cached in `tools/dexscreener.js`), PVP-rival detection. |
-| `tools/wallet.js` | 251 | `getWalletBalances` (Helius), `swapToken` (Jupiter Swap V2). `normalizeMint` collapses "SOL"/"native"/any So1-prefixed token to wrapped-SOL. Built-in referral: 50 bps to a fixed address (configurable). |
+| `tools/wallet.js` | 251 | `getWalletBalances` (Helius), `swapToken` (Jupiter Swap V2). `normalizeMint` collapses "SOL"/"native"/any So1-prefixed token to wrapped-SOL. Built-in referral: 50 bps to a fixed address (configurable). `reconcileCycleCash` measures the round trip on-chain; it drops submitted-but-never-landed signatures (`partitionLandedSignatures`) and cross-checks the inflow against Meteora's `withdrawals_sol` via `evaluateCashMismatch` — a gap over `tx.cashMismatchTolerancePct` of the deposit sets `cash_mismatch_sol` and clears `cash_complete`. |
 | `tools/token.js` | 209 | `getTokenInfo` (Jupiter datapi), `getTokenHolders` (top 100 + filter pool-tagged), `getTokenNarrative` (Jupiter ChainInsight). Cross-references smart wallets from `smart-wallets.json`. |
 | `tools/study.js` | 152 | `studyTopLPers` → Agent Meridian `/top-lp` + `/study-top-lp`. Returns ranked LPer patterns (avg hold, win rate, preferred strategy). |
 | `tools/agent-meridian.js` | 110 | `agentMeridianJson(path, opts)` with retry/backoff. Default base = `https://api.agentmeridian.xyz/api`. |
@@ -118,7 +118,9 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
 | `envcrypt.js` | 121 | XOR-cipher with a key from `.envrypt`/`ENVRYPT_KEY`. Encrypts anything matching `*_KEY`, `*SECRET*`, `*TOKEN*`, `*MNEMONIC*`, etc. The `# encrypted` marker in `.env` precedes encrypted lines. |
 | `logger.js` | 75 | Daily-rotating `logs/agent-YYYY-MM-DD.log`. `logAction({tool, args, result, duration_ms, success})` writes JSONL `actions-YYYY-MM-DD.jsonl` audit trail. Level via `LOG_LEVEL` env. |
 | **Other** | | |
+| `pnl-reconciler.js` | 400+ | `reconcileClosedPnl` re-fetches settled closed-PnL from the datapi and patches lessons/pool-memory. `recheckCash` (`scripts/reconcile-pnl.mjs --recheck-cash`) rebuilds `sol_cycle_net` from the chain by walking each **position account's** own signature history + the recorded swap tx — the repair path for closes whose signatures went missing. Both are read-modify-write on `lessons.json`; reload-before-write, but run them with the daemon paused. |
 | `discord-listener/`, `test/`, `scripts/`, `utils/` | | Discord listener (above), syntax-checked tests, envcrypt CLI, `safeNumber`. |
+| `unit-tests/` | | Offline `node:test` suite (`npm run test:unit`) — `sendTx`, close-signature accounting, trailing instrumentation. No network, no wallet; `state.json` is byte-restored. **Not** `test/`, which is live integration. |
 | `.claude/agents/{screener,manager}.md` | | Claude Code sub-agent configs — used when you run `claude` inside the repo. |
 | `.claude/commands/*.md` | | Slash commands (`/screen`, `/manage`, `/balance`, `/candidates`, `/pool-ohlcv`, etc.) that wrap `cli.js`. |
 | `.claude/settings.json` | | Denies `rm -rf`, `wget`, `Read(./.env*)`. **Forbids `run_in_background: true` via a PreToolUse hook.** |
@@ -206,6 +208,35 @@ The management cycle is **mostly deterministic in JS, LLM only for the hard case
 6. Positions with `instruction` set are marked `INSTRUCTION` and deferred to the LLM.
 7. **LLM is invoked only if any actionMap value is not `STAY`**, with a hard-coded goal that already lists positions + their assigned action. The LLM just executes (no re-evaluation). This saves tokens and prevents hallucinated rules.
 
+### Trailing exits — arm-at-peak and what it costs
+
+`trailing_active` turns on the moment the confirmed peak crosses
+`trailingTriggerPct`, which means it is armed **at the peak by construction**.
+The drop-from-peak test can therefore only ever run on a LATER tick, and the
+exit additionally waits `pnlConfirmTicks` consecutive ticks. In a fast dump the
+`trailingDropPct` level is crossed *inside* one poll interval and is never
+observed: era #9 logged 4 of 14 trailing closes overshooting by 0.7–3.9pp
+(Frohorse 8 Aug: armed at +2.55%, exit evaluated at −2.11%, a "0.8% drop rule"
+that fired at 4.66%). It is **not** a stale-data bug — the poller calls
+`getMyPositions({force:true})`, which bypasses `_positionsCache` entirely.
+
+Two things exist to manage it:
+
+- **Tick trace** — `updatePnlAndCheckExits` appends every trusted tick to
+  `state.positions[x].pnl_samples` (ring buffer, 60 entries). `getTrailingTrace()`
+  is snapshotted at the top of `closePosition` and merged into the performance
+  record: `trailing_peak_pct`, `trailing_drop_observed_pct`,
+  `trailing_overshoot_pct`, `trailing_samples`, `ms_since_prev_sample`,
+  `ms_armed_to_exit`. Suspicious ticks are excluded, same as for peak tracking.
+- **`trailingBreakevenFloorPct`** (default `null` = OFF) — once armed, exit
+  immediately at/below that PnL regardless of the drop arithmetic. Deliberately
+  opt-in: it adds an exit path to a regime that runs `stopLossPct: null`.
+
+Do **not** tighten `trailingDropPct` to "fix" the overshoot — the 10 healthy
+era #9 trailing closes stopped at drops of 0.85–1.35%, so a tighter threshold
+cuts winners short. Any proposed change needs a backtest over the 14 trailing
+closes in `lessons.json`.
+
 **Trailing TP two-phase confirmation** (15s recheck):
 - First poll: candidate drop queued in state.
 - 15s later: re-fetch positions, `resolvePendingTrailingDrop` — if the drop still holds (within 1% tolerance), fire `confirmed_trailing_exit` and trigger management cycle.
@@ -268,6 +299,51 @@ auto-swap on close (executor.js:610)
    └─ result.auto_swapped = true + auto_swap_note (so LLM doesn't double-swap)
 ```
 
+### Transaction submission (`sendTx` in `tools/dlmm.js`)
+
+Every on-chain write — deploy create/add, standard deploy, claim, close claim,
+close remove, close account, empty-position cleanup — goes through one helper.
+`sendAndConfirmTransaction` is banned from this repo: it carries no compute
+budget, relies on the RPC's own retry, and **loses the signature** when
+confirmation times out. Era #9's 135-bin txs made that fatal (19 "block height
+exceeded" in 5 days vs zero in era #8), and the lost close signatures corrupted
+8.45 SOL of cash bookkeeping across 4 closes.
+
+`sendTx(tx, signers, {label, cuLimit, priorityMicroLamports, writableAccounts, connection})`:
+
+1. Prepends `setComputeUnitLimit` + `setComputeUnitPrice` (skipped if the tx
+   already carries a ComputeBudget ix).
+2. Prices the fee dynamically: `getRecentPrioritizationFees` on the pool
+   account → p75 → clamped to `[txPriorityFeeFloor, txPriorityFeeCap]`, cached
+   15s per account set. RPC failure falls back to the floor, never zero.
+   `txPriorityFeeMicroLamports` pins a static price instead.
+3. First send keeps preflight ON so a program error surfaces **with its logs**
+   in the thrown message; every rebroadcast uses `skipPreflight: true`.
+4. `maxRetries: 0` + our own rebroadcast every `txRebroadcastIntervalMs` until
+   the blockhash dies or `txConfirmTimeoutMs` elapses. `confirmTransaction`
+   (blockhash-scoped) races an in-loop `getSignatureStatus` poll so a dead
+   WebSocket can't cost the full timeout.
+5. Before declaring failure it checks `getSignatureStatus(searchTransactionHistory)`
+   once — an "expired" tx has often actually landed.
+6. **The signature always survives**: returned on success, attached as
+   `error.signature` on every failure path (plus `error.simulationLogs` when
+   preflight rejected it).
+
+CU limits are measured, not guessed (`getTransaction` → `meta.computeUnitsConsumed`
+on real era #9 txs): create-extended-position 19k, add-liquidity chunk 453–685k,
+close remove+claim+close 375–388k, claim-only 115–124k. `txComputeUnitLimit`
+(900k) is the default; cheaper call sites pass their own. Never set a limit
+below measured consumption — the tx fails outright.
+
+**Close-signature accounting**: `closePosition` records every submitted
+signature via `recordCloseTxAttempt` (state `close_tx_attempts`, append-only
+across attempts, mirroring `deploy_txs`) *before* knowing the outcome, and both
+the success and failure returns carry `claim_txs` / `close_txs` /
+`close_tx_attempts`. The executor reconciles the **union** of the result and
+state. Step 1 (claim) calls `recordClaim` on success so a retry skips it, and
+Step 2 re-reads the position and removes only the bins that still hold
+liquidity — the close path is idempotent under retry.
+
 **OOR detection**: `getMyPositions` calls `markOutOfRange` / `markInRange` for every position every cycle. The first time we see OOR, `out_of_range_since` is set; `minutesOutOfRange` is the diff.
 
 **Position instruction** (`set_position_note`): `instruction` is sanitized (no newlines, max 280 chars, no `<>`) and shown in the system prompt + injected verbatim. The LLM must check `get_position_pnl` against the condition and execute immediately if met. The MANAGER prompt (line 144) says: "BIAS TO HOLD does NOT apply when an instruction condition is met."
@@ -315,9 +391,10 @@ All persistent files are loaded/saved on each call — no in-memory caching laye
 | `risk` | `maxPositions`, `maxDeployAmount` | 3, 50 |
 | `screening` | `excludeHighSupplyConcentration`, `minFeeActiveTvlRatio`, `maxFeeActiveTvlRatio` (null = no cap; ratio scale, 0.3 = 30% — blocks peak-degen pools), `minTvl`, `maxTvl`, `minVolume`, `minOrganic`, `minQuoteOrganic`, `minHolders`, `minMcap`, `maxMcap`, `minBinStep`, `maxBinStep`, `timeframe`, `category`, `minTokenFeesSol`, `useDiscordSignals`, `discordSignalMode`, `useGmgnTrending`, `gmgnTrendingLimit`, `useJupTrending`, `jupTrendingLimit`, `jupTrendingInterval` (5m/1h/6h/24h), `jupTrendingCategories` (toptrending/toptraded), `jupTrendingCacheTtlSec`, `useDexScreener`, `dexScreenerLimit`, `dexScreenerCategories` (top/latest), `dexScreenerCacheTtlSec`, `funnelStatsEnabled`, `funnelShadowEveryNCycles`, `avoidPvpSymbols`, `blockPvpSymbols`, `maxBotHoldersPct`, `maxTop10Pct`, `allowedLaunchpads`, `blockedLaunchpads`, `minTokenAgeHours`, `maxTokenAgeHours` | see `user-config.example.json` |
 | `gmgn` | `apiKey`, `baseUrl`, `requestDelayMs`, `maxRetries`, `feeSource` (gmgn\|jupiter), `trendingInterval` (1m/5m/1h/6h/24h), `trendingOrderBy` (swaps/volume/…) — fee source for `minTokenFeesSol` + trending screening source | gmgn, 1h, swaps |
-| `management` | `minClaimAmount`, `autoSwapAfterClaim`, `sweepEnabled`, `sweepMinUsd`, `sweepExcludeMints` (leftover-token sweep: every management cycle, priced wallet tokens ≥ sweepMinUsd with no open position are swapped back to SOL after surviving 2 consecutive scans — fallback for the ~40s post-close auto-swap retry window; see `sweepLeftoverTokens` in executor.js), `outOfRangeBinsToClose`, `outOfRangeWaitMinutes`, `oorCooldownTriggerCount`, `oorCooldownHours`, `repeatDeployCooldownEnabled`, `repeatDeployCooldownTriggerCount`, `repeatDeployCooldownHours`, `repeatDeployCooldownScope`, `repeatDeployCooldownMinFeeEarnedPct`, `postCloseReentryCooldownMinutes`, `minVolumeToRebalance`, `stopLossPct`, `takeProfitPct`, `minFeePerTvl24h`, `minAgeBeforeYieldCheck`, `minSolToOpen`, `deployAmountSol`, `gasReserve`, `positionSizePct`, `trailingTakeProfit`, `trailingTriggerPct`, `trailingDropPct`, `pnlSanityMaxDiffPct`, `solMode`, `maxHoldMinutes`, `maxHoldMinutesIfNegative` | 5, false, 10, 30, 3, 12, true, 3, 12, "token", 0, 45, 1000, -50, 5, 7, 60, 0.55, 0.5, 0.2, 0.35, true, 3, 1.5, 5, false, 240, 120 |
+| `management` | `minClaimAmount`, `autoSwapAfterClaim`, `sweepEnabled`, `sweepMinUsd`, `sweepExcludeMints` (leftover-token sweep: every management cycle, priced wallet tokens ≥ sweepMinUsd with no open position are swapped back to SOL after surviving 2 consecutive scans — fallback for the ~40s post-close auto-swap retry window; see `sweepLeftoverTokens` in executor.js), `outOfRangeBinsToClose`, `outOfRangeWaitMinutes`, `oorCooldownTriggerCount`, `oorCooldownHours`, `repeatDeployCooldownEnabled`, `repeatDeployCooldownTriggerCount`, `repeatDeployCooldownHours`, `repeatDeployCooldownScope`, `repeatDeployCooldownMinFeeEarnedPct`, `postCloseReentryCooldownMinutes`, `minVolumeToRebalance`, `stopLossPct`, `takeProfitPct`, `minFeePerTvl24h`, `minAgeBeforeYieldCheck`, `minSolToOpen`, `deployAmountSol`, `gasReserve`, `positionSizePct`, `trailingTakeProfit`, `trailingTriggerPct`, `trailingDropPct`, `pnlSanityMaxDiffPct`, `solMode`, `maxHoldMinutes`, `maxHoldMinutesIfNegative`, `trailingBreakevenFloorPct` (null = OFF; once trailing is armed, exit as soon as PnL ≤ this level — see § Trailing exits below) | 5, false, 10, 30, 3, 12, true, 3, 12, "token", 0, 45, 1000, -50, 5, 7, 60, 0.55, 0.5, 0.2, 0.35, true, 3, 1.5, 5, false, 240, 120, null |
 | `strategy` | `strategy`, `minBinsBelow`, `maxBinsBelow`, `defaultBinsBelow` | bid_ask, 35, 69, 69 |
 | `schedule` | `managementIntervalMin`, `screeningIntervalMin`, `healthCheckIntervalMin`, `screeningStartHourUtc`, `screeningEndHourUtc` (trading-hours window `[start, end)` in UTC for AUTO screening only — management + manual `/screen` never gated; 0/24 or start==end disables; wraparound like 18→6 supported) | 10, 30, 60, 0, 24 |
+| `tx` | `priorityFeeMicroLamports` (null = dynamic p75 via `getRecentPrioritizationFees` on the pool account), `priorityFeeFloor`, `priorityFeeCap`, `confirmTimeoutMs`, `rebroadcastIntervalMs`, `computeUnitLimit`, `cashMismatchTolerancePct` — all consumed by `sendTx()` in `tools/dlmm.js` | null, 50000, 500000, 60000, 2000, 900000, 1 |
 | `llm` | `temperature`, `maxTokens`, `maxSteps`, `managementModel`, `screeningModel`, `generalModel`, `promptCaching` | 0.373, 4096, 20, healer-alpha, hunter-alpha, healer-alpha, true |
 | `darwin` | `enabled`, `windowDays`, `recalcEvery`, `boostFactor`, `decayFactor`, `weightFloor`, `weightCeiling`, `minSamples` | true, 60, 5, 1.05, 0.95, 0.3, 2.5, 10 |
 | `tokens` | `SOL`, `USDC`, `USDT` (mint addresses) | canonical |
@@ -425,7 +502,7 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
 - **`lessons.js evolveThresholds()`** evolves `minOrganic` and `minFeeActiveTvlRatio` only.
 - **`get_wallet_positions` tool** is in `definitions.js` and wired in `executor.js`, but not in `MANAGER_TOOLS`/`SCREENER_TOOLS`. Only `INTENT_TOOLS.balance` / `INTENT_TOOLS.positions` expose it to GENERAL.
 - **Lazy SDK load** (`tools/dlmm.js:33`) — `@meteora-ag/dlmm` is dynamic-imported on first on-chain call to avoid CJS-import crash on Node 24 (the `postinstall` `patch-anchor.js` handles another piece of this). Don't `import` it eagerly at top of file.
-- **Position cache** (`_positionsCache` 5min TTL) — in single-process mode it's a perf win, but the cache is invalidated by `_positionsCacheAt = 0` after every deploy/close, and the executor's `deploy_position` safety check uses `force: true` for a fresh count.
+- **Position cache** (`_positionsCache` 5min TTL) — in single-process mode it's a perf win, but the cache is invalidated by `_positionsCacheAt = 0` after every deploy/close, and the executor's `deploy_position` safety check uses `force: true` for a fresh count. **It is not on the exit path**: the PnL poller and every exit evaluation call `getMyPositions({force: true})`, so the cache was ruled out as the cause of the era #9 trailing overshoots (10 Aug investigation).
 - **PnL sanity check** (`pnlSanityMaxDiffPct`, default 5%) — if reported vs derived pnl_pct differ by more than this, the LLM is told not to trust that tick. Implemented in `dlmm.js` getMyPositions and `state.js` updatePnlAndCheckExits.
 - **Partial-deposit phantom-PnL guard** (`tools/pnl.js isDepositPartiallyIndexed`, ratio 0.9) — a multi-tx wide deploy indexes into the Meteora datapi one tx at a time, so a fresh position can report a real-but-partial deposit total (understated cost basis → phantom PnL spike; JLY 5 Aug 2026 was trailing-TP'd 24s after deploy). Ticks whose indexed SOL deposits cover <90% of the tracked `amount_sol` are `pnl_pct_suspicious` (PnL rules + peak tracking paused) and the deposit cache stays on the short `depositRetryTtlSec`. Both PnL paths (rpc + Meteora fallback) apply it; `confirmPeak` call sites in `index.js` skip suspicious ticks.
 - **DRY_RUN auto-skip SOL balance check** — `runSafetyChecks` for `deploy_position` only checks `balance.sol < amountY + gasReserve` if `DRY_RUN !== "true"`.

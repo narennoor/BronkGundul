@@ -166,6 +166,66 @@ async function walletSolDelta(signatures, { attempts = 3, delayMs = 2000 } = {})
 }
 
 /**
+ * Split a signature list into the ones that exist on-chain and the ones that
+ * never landed. A submitted-but-expired signature is real input (we record every
+ * attempt now, see state.recordCloseTxAttempt) but has zero cash effect, so it
+ * must be dropped rather than counted as an unreadable tx — otherwise every
+ * retried close would look permanently incomplete.
+ *
+ * getSignatureStatuses with searchTransactionHistory is authoritative here: no
+ * status means the tx is not in the ledger, so it moved no lamports.
+ */
+async function partitionLandedSignatures(signatures) {
+  const sigs = [...new Set((signatures || []).filter(Boolean))];
+  if (!sigs.length) return { landed: [], neverLanded: [] };
+
+  const connection = getConnection();
+  const landed = [];
+  const neverLanded = [];
+  for (let i = 0; i < sigs.length; i += 100) {
+    const chunk = sigs.slice(i, i + 100);
+    let statuses = null;
+    try {
+      statuses = (await connection.getSignatureStatuses(chunk, { searchTransactionHistory: true }))?.value;
+    } catch (e) {
+      log("wallet_warn", `Signature status lookup failed: ${e.message}`);
+    }
+    chunk.forEach((sig, idx) => {
+      // On a lookup failure keep the signature — walletSolDelta will retry it and
+      // report it missing, which is the conservative outcome.
+      if (!statuses) return landed.push(sig);
+      if (statuses[idx]) landed.push(sig);
+      else neverLanded.push(sig);
+    });
+  }
+  return { landed, neverLanded };
+}
+
+/**
+ * Decide whether our on-chain measurement of the money coming back disagrees
+ * with Meteora's own settled withdrawals by more than slippage can explain.
+ *
+ * Pure arithmetic, exported so it can be unit-tested without an RPC.
+ * `inflowSol` = sol_in_close + sol_in_swap. A negative mismatch means we
+ * measured LESS than Meteora recorded, i.e. close signatures are missing from
+ * our ledger — the era #9 failure mode.
+ */
+export function evaluateCashMismatch({ inflowSol, withdrawalsSol, depositBasisSol, tolerancePct = 1 }) {
+  const withdrawals = withdrawalsSol == null ? NaN : Number(withdrawalsSol);
+  const basis = Math.abs(Number(depositBasisSol) || 0);
+  if (!Number.isFinite(withdrawals) || basis <= 0) {
+    return { mismatch_sol: null, over_tolerance: false, tolerance_sol: null };
+  }
+  const mismatch = Math.round((Number(inflowSol || 0) - withdrawals) * 1e9) / 1e9;
+  const toleranceSol = (basis * Number(tolerancePct || 0)) / 100;
+  return {
+    mismatch_sol: mismatch,
+    tolerance_sol: Math.round(toleranceSol * 1e9) / 1e9,
+    over_tolerance: Math.abs(mismatch) > toleranceSol,
+  };
+}
+
+/**
  * Per-cycle cash reconciliation: what the wallet actually paid out at deploy
  * and actually got back at claim/close/swap, measured on-chain.
  *
@@ -178,14 +238,45 @@ async function walletSolDelta(signatures, { attempts = 3, delayMs = 2000 } = {})
  *
  * Read-only and off the execution path — call it after the swap has settled.
  */
-export async function reconcileCycleCash({ deploy_txs, claim_txs, close_txs, swap_tx }) {
+export async function reconcileCycleCash({
+  deploy_txs,
+  claim_txs,
+  close_txs,
+  swap_tx,
+  withdrawals_sol = null,
+  deposits_sol = null,
+}) {
+  // Drop submitted-but-never-landed attempts before measuring.
+  const [claimSet, closeSet] = await Promise.all([
+    partitionLandedSignatures(claim_txs),
+    partitionLandedSignatures(close_txs),
+  ]);
+
   const [deploy, claim, close, swap] = await Promise.all([
     walletSolDelta(deploy_txs),
-    walletSolDelta(claim_txs),
-    walletSolDelta(close_txs),
+    walletSolDelta(claimSet.landed),
+    walletSolDelta(closeSet.landed),
     walletSolDelta(swap_tx ? [swap_tx] : []),
   ]);
   const missing = deploy.missing + claim.missing + close.missing + swap.missing;
+
+  // ── Cross-check against Meteora's own accounting ────────────────
+  // walletSolDelta can only measure the signatures it is handed. If a close tx
+  // never reached us (the pre-Aug-2026 failure mode: an exception discarded the
+  // signatures of txs that HAD landed), the sum looks internally consistent and
+  // `missing === 0` happily declares it complete — that is how four era #9 closes
+  // booked -8.3 SOL of losses the wallet never took. Meteora's withdrawals_sol is
+  // an independent measurement of the same money, so disagreeing with it by more
+  // than a slippage-sized fraction of the deposit means signatures are missing,
+  // not that the money is.
+  const tolerancePct = Number(config.tx?.cashMismatchTolerancePct ?? 1);
+  const { mismatch_sol: mismatchSol, over_tolerance: mismatchOverTolerance } = evaluateCashMismatch({
+    inflowSol: close.sol + swap.sol,
+    withdrawalsSol: withdrawals_sol,
+    depositBasisSol: Math.abs(Number(deposits_sol) || 0) || Math.abs(deploy.sol),
+    tolerancePct,
+  });
+
   return {
     sol_out_deploy: deploy.sol,
     sol_in_claim: claim.sol,
@@ -195,9 +286,15 @@ export async function reconcileCycleCash({ deploy_txs, claim_txs, close_txs, swa
     sol_cycle_net: Math.round((deploy.sol + claim.sol + close.sol + swap.sol) * 1e9) / 1e9,
     cash_txs_found: deploy.found + claim.found + close.found + swap.found,
     cash_txs_missing: missing,
-    // Any unresolved signature makes the totals incomplete — mark it so no
-    // analysis mistakes a partial sum for a real shortfall.
-    cash_complete: missing === 0 && deploy.found > 0 && close.found > 0,
+    cash_txs_never_landed: claimSet.neverLanded.length + closeSet.neverLanded.length,
+    // Signed gap vs Meteora: negative = we measured LESS coming back than Meteora
+    // says was withdrawn, i.e. close signatures are missing from our ledger.
+    cash_mismatch_sol: mismatchSol,
+    cash_mismatch_tolerance_pct: tolerancePct,
+    // Any unresolved signature — or a cross-check that fails — makes the totals
+    // incomplete. Never let a partial sum pass as a real shortfall.
+    cash_complete: missing === 0 && deploy.found > 0 && close.found > 0 && !mismatchOverTolerance,
+    cash_mismatch_over_tolerance: mismatchOverTolerance,
   };
 }
 

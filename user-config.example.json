@@ -77,8 +77,17 @@
   "trailingTakeProfit": true,
   "trailingTriggerPct": 3,
   "trailingDropPct": 1.5,
+  "trailingBreakevenFloorPct": null,
   "pnlSanityMaxDiffPct": 5,
   "solMode": false,
+
+  "txPriorityFeeMicroLamports": null,
+  "txPriorityFeeFloor": 50000,
+  "txPriorityFeeCap": 500000,
+  "txConfirmTimeoutMs": 60000,
+  "txRebroadcastIntervalMs": 2000,
+  "txComputeUnitLimit": 900000,
+  "txCashMismatchTolerancePct": 1,
 
   "managementIntervalMin": 10,
   "screeningIntervalMin": 30,

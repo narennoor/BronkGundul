@@ -11,7 +11,7 @@
 
 import fs from "fs";
 import bs58 from "bs58";
-import { Keypair } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { repoPath } from "./repo-root.js";
 import { log } from "./logger.js";
 
@@ -171,6 +171,171 @@ export async function reconcileClosedPnl({ lookbackHours = 48, force = false, dr
     log("reconcile", `Checked ${candidates.length} close(s): patched ${patches.length} (net ${totalDelta >= 0 ? "+" : ""}$${totalDelta.toFixed(2)}), flagged ${flagged}${dryRun ? " [DRY RUN]" : ""}`);
   }
   return { checked: candidates.length, patched: patches.length, flagged, totalDelta, patches };
+}
+
+// ─── Cash recheck (--recheck-cash) ──────────────────────────────
+// Rebuilds sol_cycle_net for a closed position from the chain instead of from
+// the signatures the close path happened to hand over.
+//
+// Why it can't just re-run reconcileCycleCash: that function measures the
+// signatures it is given, and the whole failure being repaired here is that
+// signatures went missing (a timed-out close tx unwound the function and took
+// the already-landed signatures with it). So this walks the POSITION ACCOUNT's
+// own signature history — every deploy, add, claim, remove and close tx touched
+// that account, and nothing else did, so the set is both complete and free of
+// other positions' traffic. The Jupiter swap leg is the one tx that never
+// touches the position account, and it is already recorded on the entry as
+// exit_execution.swap_tx.
+
+function getRpcConnection() {
+  const url = process.env.RPC_URL
+    || (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : null);
+  if (!url) throw new Error("RPC_URL (or HELIUS_API_KEY) not set");
+  return new Connection(url, "confirmed");
+}
+
+async function allSignaturesForAddress(connection, address, { max = 1000 } = {}) {
+  const out = [];
+  let before = undefined;
+  while (out.length < max) {
+    const page = await connection.getSignaturesForAddress(new PublicKey(address), { limit: 1000, before });
+    if (!page?.length) break;
+    for (const s of page) if (!s.err) out.push(s.signature);
+    if (page.length < 1000) break;
+    before = page[page.length - 1].signature;
+    await new Promise((r) => setTimeout(r, REQUEST_DELAY_MS));
+  }
+  return out;
+}
+
+async function walletDeltaFor(connection, walletAddr, signature) {
+  const tx = await connection.getTransaction(signature, {
+    maxSupportedTransactionVersion: 0,
+    commitment: "confirmed",
+  });
+  const msg = tx?.transaction?.message;
+  const keys = msg?.staticAccountKeys || msg?.accountKeys || [];
+  const idx = keys.findIndex((k) => k?.toString() === walletAddr);
+  if (!tx?.meta || idx < 0) return null;
+  return (tx.meta.postBalances[idx] - tx.meta.preBalances[idx]) / 1e9;
+}
+
+const round9 = (n) => Math.round(n * 1e9) / 1e9;
+
+/**
+ * Recompute the on-chain cash figures for closed positions and patch
+ * lessons.json.
+ *
+ * @param {object} opts
+ * @param {string[]} opts.positions - position addresses to fix; empty = every
+ *   entry inside `lookbackHours` whose books look suspect
+ * @param {number} opts.lookbackHours
+ * @param {boolean} opts.dryRun
+ * @param {boolean} opts.all - with no explicit positions, recheck every entry in
+ *   the window instead of only the suspect ones
+ */
+export async function recheckCash({ positions = [], lookbackHours = 168, dryRun = false, all = false } = {}) {
+  const walletAddr = getWalletAddress();
+  const connection = getRpcConnection();
+  const data = readJson("lessons.json", null);
+  if (!data?.performance?.length) return { checked: 0, patched: 0, patches: [] };
+  const state = readJson("state.json", { positions: {} });
+
+  const wanted = new Set(positions.filter(Boolean));
+  const cutoff = Date.now() - lookbackHours * 3600_000;
+  const targets = data.performance.filter((p) => {
+    if (!p.position) return false;
+    if (wanted.size) return wanted.has(p.position);
+    const t = new Date(p.recorded_at).getTime();
+    if (!Number.isFinite(t) || t < cutoff) return false;
+    if (all) return true;
+    // Suspect = our measured inflow disagrees with Meteora's withdrawals by
+    // more than 1% of the deposit. Exactly the gate the live path now applies.
+    const x = p.exit_execution || {};
+    const inflow = (x.sol_in_close ?? 0) + (x.sol_in_swap ?? 0);
+    const basis = Math.abs(p.deposits_sol ?? p.amount_sol ?? 0);
+    if (!basis || p.withdrawals_sol == null) return false;
+    return Math.abs(inflow - p.withdrawals_sol) > basis * 0.01;
+  });
+  if (!targets.length) return { checked: 0, patched: 0, patches: [] };
+
+  const results = new Map();
+  for (const entry of targets) {
+    try {
+      const deploySigs = new Set(state.positions?.[entry.position]?.deploy_txs || []);
+      const swapTx = entry.exit_execution?.swap_tx || null;
+      const positionSigs = await allSignaturesForAddress(connection, entry.position);
+      const sigs = [...new Set([...positionSigs, ...deploySigs, ...(swapTx ? [swapTx] : [])])];
+
+      let outDeploy = 0, inClose = 0, inSwap = 0, found = 0, missing = 0;
+      for (const sig of sigs) {
+        const delta = await walletDeltaFor(connection, walletAddr, sig);
+        if (delta == null) { missing++; continue; }
+        found++;
+        if (sig === swapTx) inSwap += delta;
+        else if (deploySigs.has(sig)) outDeploy += delta;
+        else inClose += delta;
+        await new Promise((r) => setTimeout(r, 60));
+      }
+
+      results.set(entry.position, {
+        position: entry.position,
+        pool_name: entry.pool_name,
+        recorded_at: entry.recorded_at,
+        before: entry.exit_execution?.sol_cycle_net ?? null,
+        cash: {
+          sol_out_deploy: round9(outDeploy),
+          sol_in_claim: 0, // claims land on the position account too; folded into close
+          sol_in_close: round9(inClose),
+          sol_in_swap: round9(inSwap),
+          sol_cycle_net: round9(outDeploy + inClose + inSwap),
+          cash_txs_found: found,
+          cash_txs_missing: missing,
+          cash_complete: missing === 0 && found > 0,
+          cash_source: "recheck-cash (position-account scan)",
+          cash_rechecked_at: new Date().toISOString(),
+        },
+      });
+    } catch (e) {
+      log("reconcile_warn", `recheck-cash failed for ${entry.position.slice(0, 8)}: ${e.message}`);
+    }
+  }
+
+  // Reload fresh before writing — a live close may have landed meanwhile.
+  const fresh = readJson("lessons.json", null);
+  const patches = [];
+  for (const entry of fresh?.performance || []) {
+    const result = results.get(entry.position);
+    if (!result || entry.recorded_at !== result.recorded_at) continue;
+    const previous = entry.exit_execution || {};
+    entry.exit_execution = {
+      ...previous,
+      ...result.cash,
+      pre_recheck_cash: previous.pre_recheck_cash || {
+        sol_out_deploy: previous.sol_out_deploy ?? null,
+        sol_in_close: previous.sol_in_close ?? null,
+        sol_in_swap: previous.sol_in_swap ?? null,
+        sol_cycle_net: previous.sol_cycle_net ?? null,
+        cash_complete: previous.cash_complete ?? null,
+      },
+    };
+    patches.push({
+      position: entry.position,
+      pool_name: entry.pool_name,
+      recorded_at: entry.recorded_at,
+      before: result.before,
+      after: result.cash.sol_cycle_net,
+      delta: round9(result.cash.sol_cycle_net - (result.before ?? 0)),
+      txs: result.cash.cash_txs_found,
+    });
+  }
+
+  if (!dryRun && patches.length) writeJson("lessons.json", fresh);
+  const totalDelta = round9(patches.reduce((s, p) => s + p.delta, 0));
+  if (patches.length) {
+    log("reconcile", `recheck-cash patched ${patches.length} close(s), net ${totalDelta >= 0 ? "+" : ""}${totalDelta} SOL${dryRun ? " [DRY RUN]" : ""}`);
+  }
+  return { checked: targets.length, patched: patches.length, patches, totalDelta };
 }
 
 // Same exclusion rule as pool-memory.isAdjustedWinRateExcludedReason (not exported).

@@ -173,6 +173,15 @@ export const config = {
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
+    // Breakeven floor for an ARMED trailing position — once trailing_active is on,
+    // exit immediately if PnL falls to/below this level, without waiting for the
+    // drop-from-peak arithmetic. Rationale (era #9, 4 of 14 trailing closes): the
+    // trailing exit arms exactly AT the peak, so a dump that clears trailingDropPct
+    // inside one poll interval is only ever observed far past the threshold
+    // (Frohorse 8 Aug: armed at +2.55%, first evaluated drop already -2.11%).
+    // null = OFF (default) — this adds an exit path in a regime that runs with
+    // stopLossPct null on purpose, so the operator must enable it deliberately.
+    trailingBreakevenFloorPct: ("trailingBreakevenFloorPct" in u) ? u.trailingBreakevenFloorPct : null,
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
@@ -279,6 +288,49 @@ export const config = {
     // holds the same lock (double-act guard).
     pollDuringCycles: u.pnlPollDuringCycles === true,
     busyPollIntervalSec: Number(u.pnlBusyPollIntervalSec ?? 9),
+  },
+
+  // ─── Transaction submission (priority fee + rebroadcast) ────────
+  // Era #9 runs 135-bin positions: deploy is 3 txs, close is 1-3 txs, each far
+  // heavier than era #8's 40-bin single tx. With no priority fee at all, 5-10 Aug
+  // logged 11 CLOSE_ERROR + 8 DEPLOY_ERROR "block height exceeded" (era #8: zero).
+  // Every one of those timeouts triggers a retry, and the retry is what corrupted
+  // the cash accounting (close signatures from the timed-out attempt were lost).
+  tx: {
+    // null = dynamic (getRecentPrioritizationFees p75 on the pool account, clamped
+    // to [floor, cap]); a number pins a static price in micro-lamports per CU.
+    priorityFeeMicroLamports: ("txPriorityFeeMicroLamports" in u) ? u.txPriorityFeeMicroLamports : null,
+    // Cost of the band, worked out from the measured CU numbers below
+    // (priority fee = cuLimit × µLamports / 1e6 lamports):
+    //   at the 50k floor  — deploy 3 tx ≈ 0.0001 SOL, close 2-3 tx ≈ 0.00009 SOL
+    //                       → ~0.0002 SOL per full cycle (~5× the 0.00002 SOL of
+    //                         base fees the agent pays today, still noise)
+    //   at the 500k cap   — deploy ≈ 0.001 SOL, close ≈ 0.0009 SOL
+    //                       → ~0.0019 SOL per cycle, and only while the pool is
+    //                         actually contested
+    // Era #9 ran ~31 cycles/day, so the realistic bill is ~0.006 SOL/day and the
+    // absolute worst case (every tx pinned at the cap) is ~0.06 SOL/day. Against
+    // that: 19 expired txs in 5 days, one of which (Frohorse, 8 Aug) cost 0.0738
+    // SOL on its own, plus the retries that corrupted 8.45 SOL of bookkeeping.
+    // Lower txPriorityFeeCap if the fee band ever shows up in the era review.
+    priorityFeeFloor: Number(u.txPriorityFeeFloor ?? 50_000),
+    priorityFeeCap: Number(u.txPriorityFeeCap ?? 500_000),
+    // How long to keep rebroadcasting + waiting for a confirmation before giving up.
+    confirmTimeoutMs: Number(u.txConfirmTimeoutMs ?? 60_000),
+    rebroadcastIntervalMs: Number(u.txRebroadcastIntervalMs ?? 2_000),
+    // Default compute-unit limit. Measured on real era #9 txs (getTransaction →
+    // meta.computeUnitsConsumed): create-extended-position 19k, add-liquidity chunk
+    // 453-685k, close (remove+claim+close) 375-388k, claim-only 115-124k. 900k
+    // covers the heaviest observed with ~30% headroom; call sites that are known to
+    // be cheaper (or the ≤69-bin single-tx deploy, which is never exercised in era
+    // #9) pass their own limit. Priority fee is charged on the LIMIT, so a tighter
+    // limit is also cheaper — never set it below the measured consumption.
+    computeUnitLimit: Number(u.txComputeUnitLimit ?? 900_000),
+    // Cross-check tolerance for the close-side cash reconciliation: if
+    // |sol_in_close + sol_in_swap - withdrawals_sol| exceeds this % of the deposit,
+    // the cycle is marked incomplete (cash_mismatch_sol) instead of silently
+    // booking a hole (7-10 Aug: 4 closes booked -8.3 SOL of phantom loss).
+    cashMismatchTolerancePct: Number(u.txCashMismatchTolerancePct ?? 1),
   },
 
   // ─── Opportunity poller (catches strong pools between screening cycles) ──

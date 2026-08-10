@@ -256,6 +256,20 @@ function deriveLiquidationGapSol(entry, exec) {
   return Math.round((exec.sol_cycle_net - pnlSol) * 1e9) / 1e9;
 }
 
+/**
+ * Most recent performance entry for a position, or null.
+ * Used by the close-side cash reconciliation to read Meteora's own
+ * withdrawals_sol / deposits_sol as an independent cross-check.
+ */
+export function getPerformanceEntry(positionAddress) {
+  if (!positionAddress) return null;
+  const data = load();
+  for (let i = data.performance.length - 1; i >= 0; i--) {
+    if (data.performance[i].position === positionAddress) return data.performance[i];
+  }
+  return null;
+}
+
 export function attachExitExecution(positionAddress, exec) {
   if (!positionAddress || !exec) return false;
   const data = load();

@@ -16,6 +16,11 @@ const STATE_FILE = repoPath("state.json");
 
 const MAX_RECENT_EVENTS = 20;
 const MAX_INSTRUCTION_LENGTH = 280;
+// Per-position tick trace kept for trailing-exit forensics. At the 3s poll
+// cadence 60 samples ≈ 3 minutes of history, which covers the arm→exit window
+// of every era #9 trailing close (longest observed: 62 minutes for a healthy
+// one, 24 seconds for the worst overshoot — the tail is what matters).
+const MAX_PNL_SAMPLES = 60;
 
 function sanitizeStoredText(text, maxLen = MAX_INSTRUCTION_LENGTH) {
   if (text == null) return null;
@@ -219,6 +224,40 @@ export function recordClose(position_address, reason) {
 }
 
 /**
+ * Append a close-transaction signature the moment it is submitted, BEFORE we
+ * know whether it confirms.
+ *
+ * Why this exists (7-10 Aug 2026): a 135-bin close is 2-3 removeLiquidity txs.
+ * When tx N timed out ("block height exceeded"), the exception unwound
+ * closePosition and took the whole in-memory `closeTxHashes` array with it —
+ * including the signatures that had already LANDED. The retry then reported only
+ * its own signature, so reconcileCycleCash measured 26% of the deposit coming
+ * back, called it complete, and booked a -3.02 SOL phantom loss on a cycle whose
+ * wallet delta was +0.0001 SOL. Four closes, -8.3 SOL of fiction.
+ *
+ * Accumulate here (never overwrite) so the union survives across attempts, the
+ * same way deploy_txs already does on the deploy side.
+ */
+export function recordCloseTxAttempt(position_address, signature) {
+  if (!signature) return;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return;
+  if (!Array.isArray(pos.close_tx_attempts)) pos.close_tx_attempts = [];
+  if (pos.close_tx_attempts.includes(signature)) return;
+  pos.close_tx_attempts.push(signature);
+  save(state);
+}
+
+/**
+ * Every close/claim signature ever submitted for this position, across attempts.
+ */
+export function getCloseTxAttempts(position_address) {
+  const state = load();
+  return state.positions[position_address]?.close_tx_attempts || [];
+}
+
+/**
  * Set a persistent instruction for a position (e.g. "hold until 5% profit").
  * Overwrites any previous instruction. Pass null to clear.
  */
@@ -327,6 +366,48 @@ export function registerExitSignal(position_address, signal, confirmTicks = 2, m
 }
 
 /**
+ * Snapshot of everything the trailing exit was working from, for the performance
+ * record. Call it BEFORE the close txs run — the trace is what happened up to
+ * the exit signal, not what happened during settlement.
+ *
+ * `overshoot_pct` is the number to watch: observed drop minus the configured
+ * trailingDropPct. Zero-ish means the exit fired where it was supposed to; the
+ * era #9 blow-ups were +0.7 to +3.9pp.
+ */
+export function getTrailingTrace(position_address, trailingDropPct = null) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return null;
+
+  const samples = Array.isArray(pos.pnl_samples) ? pos.pnl_samples : [];
+  const last = samples.length ? samples[samples.length - 1] : null;
+  const prev = samples.length > 1 ? samples[samples.length - 2] : null;
+  const peak = pos.peak_pnl_pct ?? null;
+  const dropObserved = (peak != null && last?.p != null) ? peak - last.p : null;
+  const armedAtMs = pos.trailing_armed_at ? Date.parse(pos.trailing_armed_at) : null;
+
+  return {
+    trailing_active: !!pos.trailing_active,
+    trailing_armed_at: pos.trailing_armed_at ?? null,
+    trailing_armed_peak_pct: pos.trailing_armed_peak_pct ?? null,
+    trailing_peak_pct: peak,
+    trailing_exit_pnl_pct: last?.p ?? null,
+    trailing_drop_observed_pct: dropObserved != null ? Math.round(dropObserved * 100) / 100 : null,
+    trailing_overshoot_pct: (dropObserved != null && trailingDropPct != null)
+      ? Math.round((dropObserved - trailingDropPct) * 100) / 100
+      : null,
+    // The full buffer stays in state.json; the performance record only needs the
+    // tail around the exit. Attaching 60 samples to every one of the ~150
+    // closes per era would bloat lessons.json for no analytical gain, and a
+    // close that never armed trailing has nothing to explain at all.
+    trailing_samples: pos.trailing_active ? samples.slice(-24) : [],
+    trailing_sample_count: samples.length,
+    ms_since_prev_sample: (last && prev) ? Date.parse(last.t) - Date.parse(prev.t) : null,
+    ms_armed_to_exit: (armedAtMs && last) ? Date.parse(last.t) - armedAtMs : null,
+  };
+}
+
+/**
  * Get all tracked positions (optionally filter open-only).
  */
 export function getTrackedPositions(openOnly = false) {
@@ -390,9 +471,28 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   let changed = false;
 
+  // ── Tick trace (era #9 trailing-overshoot instrumentation) ──────
+  // The poller calls this once per position per tick, and state is already
+  // loaded/saved here, so the ring buffer costs no extra I/O. Without it there
+  // is no record of what PnL looked like BETWEEN the peak and the exit — which
+  // is exactly the window where 4 of 14 era #9 trailing closes lost their gains
+  // (peak confirmed, then the very next evaluated tick was already 1.5-4.7%
+  // below it). Trusted ticks only: a suspicious tick must not pollute the trace
+  // any more than it is allowed to raise the peak.
+  if (!pnl_pct_suspicious && currentPnlPct != null) {
+    if (!Array.isArray(pos.pnl_samples)) pos.pnl_samples = [];
+    pos.pnl_samples.push({ t: new Date().toISOString(), p: currentPnlPct });
+    if (pos.pnl_samples.length > MAX_PNL_SAMPLES) {
+      pos.pnl_samples = pos.pnl_samples.slice(-MAX_PNL_SAMPLES);
+    }
+    changed = true;
+  }
+
   // Activate trailing TP once trigger threshold is reached
   if (mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= mgmtConfig.trailingTriggerPct) {
     pos.trailing_active = true;
+    pos.trailing_armed_at = new Date().toISOString();
+    pos.trailing_armed_peak_pct = pos.peak_pnl_pct ?? null;
     changed = true;
     log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%)`);
   }
@@ -421,6 +521,23 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // ── Trailing TP ────────────────────────────────────────────────
   if (!pnl_pct_suspicious && pos.trailing_active) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
+    // Breakeven floor (default OFF). Trailing arms AT the peak, so the drop-from-peak
+    // test can only ever be evaluated on a tick that is already past the threshold;
+    // when the dump clears trailingDropPct inside one poll interval the position
+    // exits deep in the red instead of near the peak. This floor is the backstop:
+    // a position that was good enough to arm trailing must not be closed for a loss.
+    const floorPct = mgmtConfig.trailingBreakevenFloorPct;
+    if (floorPct != null && currentPnlPct != null && currentPnlPct <= floorPct) {
+      return {
+        action: "TRAILING_TP",
+        reason: `Trailing breakeven floor: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% <= floor ${floorPct}%`,
+        needs_confirmation: true,
+        peak_pnl_pct: pos.peak_pnl_pct,
+        current_pnl_pct: currentPnlPct,
+        drop_from_peak_pct: dropFromPeak,
+        breakeven_floor: true,
+      };
+    }
     if (dropFromPeak >= mgmtConfig.trailingDropPct) {
       return {
         action: "TRAILING_TP",

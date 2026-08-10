@@ -1,4 +1,5 @@
 import {
+  ComputeBudgetProgram,
   Connection,
   Keypair,
   PublicKey,
@@ -7,7 +8,6 @@ import {
   Transaction,
   TransactionInstruction,
   VersionedTransaction,
-  sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
@@ -19,6 +19,9 @@ import {
   markInRange,
   recordClaim,
   recordClose,
+  recordCloseTxAttempt,
+  getCloseTxAttempts,
+  getTrailingTrace,
   getTrackedPosition,
   getTrackedPositions,
   minutesOutOfRange,
@@ -97,6 +100,264 @@ function getWallet() {
     log("init", `Wallet: ${_wallet.publicKey.toString()}`);
   }
   return _wallet;
+}
+
+// ─── Centralized transaction submission ────────────────────────
+// Every on-chain write in this file goes through sendTx(). web3.js's
+// sendAndConfirmTransaction is deliberately NOT used: it sends with the RPC's
+// internal retry (which stops the moment the node drops the tx from its queue),
+// carries no compute budget, and — the expensive part — throws away the
+// signature when the confirmation times out. Era #9's 135-bin txs are heavy
+// enough that "block height exceeded" became routine (19 occurrences 5-10 Aug,
+// zero in era #8), and each lost signature took a chunk of the cash accounting
+// with it (see reconcileCycleCash / close_tx_attempts).
+//
+// sendTx guarantees:
+//   - ComputeBudget price + limit instructions are prepended (unless the tx
+//     already carries its own),
+//   - raw send with maxRetries: 0 and our own ~2s rebroadcast loop that runs
+//     until the blockhash dies,
+//   - blockhash-scoped confirmTransaction, with a getSignatureStatus check
+//     before declaring failure (an "expired" tx has often actually landed),
+//   - the signature is ALWAYS available — returned on success, attached as
+//     `error.signature` on every failure path.
+
+const PRIORITY_FEE_CACHE_MS = 15_000;
+let _priorityFeeCache = { at: 0, key: null, value: null };
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function clampPriorityFee(value) {
+  const floor = Number(config.tx.priorityFeeFloor) || 0;
+  const cap = Number(config.tx.priorityFeeCap) || floor;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return floor;
+  return Math.round(Math.min(Math.max(n, floor), Math.max(floor, cap)));
+}
+
+function toPublicKeys(accounts) {
+  const keys = [];
+  for (const account of accounts || []) {
+    try {
+      keys.push(account instanceof PublicKey ? account : new PublicKey(String(account)));
+    } catch { /* skip unparsable */ }
+  }
+  return keys;
+}
+
+/**
+ * Priority fee in micro-lamports per compute unit.
+ * Dynamic mode asks the RPC for recent fees on the accounts this tx writes to
+ * (the pool) and takes the ~75th percentile — high enough to beat the crowd
+ * competing for the same pool, low enough not to overpay a quiet market.
+ * Any RPC failure falls back to the configured floor, never to zero.
+ */
+export async function resolvePriorityFee(connection, writableAccounts = []) {
+  const configured = config.tx.priorityFeeMicroLamports;
+  if (configured != null) return { micro: clampPriorityFee(configured), source: "static" };
+
+  const keys = toPublicKeys(writableAccounts);
+  const cacheKey = keys.map((k) => k.toString()).sort().join(",");
+  if (_priorityFeeCache.key === cacheKey && Date.now() - _priorityFeeCache.at < PRIORITY_FEE_CACHE_MS) {
+    return { micro: _priorityFeeCache.value, source: "cached" };
+  }
+
+  try {
+    const samples = await connection.getRecentPrioritizationFees(
+      keys.length ? { lockedWritableAccounts: keys } : {},
+    );
+    const values = (samples || [])
+      .map((s) => Number(s?.prioritizationFee))
+      .filter((n) => Number.isFinite(n))
+      .sort((a, b) => a - b);
+    if (!values.length) throw new Error("no prioritization-fee samples");
+    const p75 = values[Math.min(values.length - 1, Math.floor(values.length * 0.75))];
+    const micro = clampPriorityFee(p75);
+    _priorityFeeCache = { at: Date.now(), key: cacheKey, value: micro };
+    return { micro, source: `p75/${values.length}` };
+  } catch (error) {
+    return { micro: clampPriorityFee(config.tx.priorityFeeFloor), source: `floor (${error.message})` };
+  }
+}
+
+function hasComputeBudgetIx(tx) {
+  return (tx?.instructions || []).some(
+    (ix) => ix?.programId?.toString?.() === ComputeBudgetProgram.programId.toString(),
+  );
+}
+
+function isAlreadyProcessed(error) {
+  return /already been processed|AlreadyProcessed/i.test(String(error?.message || ""));
+}
+
+async function extractSimulationLogs(error, connection) {
+  if (Array.isArray(error?.logs) && error.logs.length) return error.logs;
+  try {
+    const logs = await error?.getLogs?.(connection);
+    return Array.isArray(logs) ? logs : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Send + confirm one legacy Transaction. Returns the signature.
+ * Throws on failure with `error.signature` set (and `error.simulationLogs`
+ * when preflight rejected it) so callers never lose a submitted signature.
+ *
+ * @param {import("@solana/web3.js").Transaction} tx
+ * @param {Array} signers - signers[0] pays the fee
+ * @param {object} opts
+ * @param {string} opts.label - log label, e.g. "close_remove"
+ * @param {number} [opts.cuLimit] - compute-unit limit (defaults to config.tx.computeUnitLimit)
+ * @param {number} [opts.priorityMicroLamports] - explicit price, skips the dynamic lookup
+ * @param {Array} [opts.writableAccounts] - accounts to price the dynamic fee against
+ * @param {object} [opts.connection] - injectable for tests
+ */
+export async function sendTx(tx, signers, opts = {}) {
+  const {
+    label = "tx",
+    cuLimit = null,
+    priorityMicroLamports = null,
+    writableAccounts = [],
+    connection = null,
+    commitment = "confirmed",
+  } = opts;
+  const conn = connection || getConnection();
+  const timeoutMs = Number(opts.confirmTimeoutMs ?? config.tx.confirmTimeoutMs);
+  const intervalMs = Math.max(50, Number(opts.rebroadcastIntervalMs ?? config.tx.rebroadcastIntervalMs));
+  const units = Number(cuLimit ?? config.tx.computeUnitLimit);
+
+  let fee = { micro: 0, source: "preset" };
+  if (!hasComputeBudgetIx(tx)) {
+    fee = priorityMicroLamports != null
+      ? { micro: clampPriorityFee(priorityMicroLamports), source: "explicit" }
+      : await resolvePriorityFee(conn, writableAccounts);
+    const budgetIxs = [];
+    if (Number.isFinite(units) && units > 0) {
+      budgetIxs.push(ComputeBudgetProgram.setComputeUnitLimit({ units: Math.round(units) }));
+    }
+    if (fee.micro > 0) {
+      budgetIxs.push(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: fee.micro }));
+    }
+    if (budgetIxs.length) tx.instructions.unshift(...budgetIxs);
+  }
+
+  const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash(commitment);
+  tx.recentBlockhash = blockhash;
+  tx.lastValidBlockHeight = lastValidBlockHeight;
+  tx.feePayer = signers[0].publicKey;
+  tx.sign(...signers);
+  const signature = bs58.encode(tx.signature);
+  const raw = tx.serialize();
+
+  const startedAt = Date.now();
+  let rebroadcasts = 0;
+
+  const broadcast = async (skipPreflight) => {
+    try {
+      await conn.sendRawTransaction(raw, { skipPreflight, maxRetries: 0, preflightCommitment: commitment });
+      return null;
+    } catch (error) {
+      return error;
+    }
+  };
+
+  // First send keeps preflight ON so a genuine program error surfaces here, with
+  // its simulation logs, instead of as an opaque "Simulation failed" (5 such
+  // DEPLOY_ERRORs in era #9 had no readable cause).
+  const preflightError = await broadcast(false);
+  if (preflightError && !isAlreadyProcessed(preflightError)) {
+    const logs = await extractSimulationLogs(preflightError, conn);
+    const error = new Error(
+      `${label} simulation failed: ${preflightError.message}` +
+      (logs?.length ? ` | logs: ${logs.slice(-8).join(" | ")}` : ""),
+    );
+    error.signature = signature;
+    error.simulationLogs = logs;
+    throw error;
+  }
+
+  let settled = null;
+  const confirmPromise = conn
+    .confirmTransaction({ signature, blockhash, lastValidBlockHeight }, commitment)
+    .then((res) => ({ ok: true, value: res?.value ?? null }))
+    .catch((error) => ({ ok: false, error }));
+  confirmPromise.then((res) => { settled = res; });
+
+  while (!settled && Date.now() - startedAt < timeoutMs) {
+    await sleep(intervalMs);
+    if (settled) break;
+    // Poll the ledger alongside confirmTransaction. That call rides a WebSocket
+    // subscription; if the endpoint has no ws (or drops it) it never resolves,
+    // and without this poll every single tx would burn the full confirm timeout.
+    const polled = await conn
+      .getSignatureStatus(signature, { searchTransactionHistory: false })
+      .catch(() => null);
+    if (polled?.value) {
+      settled = { ok: true, value: { err: polled.value.err ?? null } };
+      break;
+    }
+    // Blockhash dead → rebroadcasting is pointless; fall through to the
+    // signature-status check, which decides whether it landed in time.
+    let height = null;
+    try { height = await conn.getBlockHeight(commitment); } catch { /* transient */ }
+    if (height != null && height > lastValidBlockHeight) break;
+    await broadcast(true);
+    rebroadcasts++;
+  }
+
+  const result = settled || (await Promise.race([confirmPromise, sleep(1_000).then(() => null)]));
+  const elapsedMs = Date.now() - startedAt;
+
+  if (result?.ok && !result.value?.err) {
+    log(
+      "tx",
+      `${label} confirmed in ${elapsedMs}ms — fee ${fee.micro} µLamports/CU (${fee.source}), cu_limit ${units}, ${rebroadcasts} rebroadcast(s): ${signature}`,
+    );
+    return signature;
+  }
+  if (result?.ok && result.value?.err) {
+    const error = new Error(`${label} failed on-chain: ${JSON.stringify(result.value.err)}`);
+    error.signature = signature;
+    throw error;
+  }
+
+  // Confirmation timed out or the subscription failed. "Expired" is frequently a
+  // lie — check the ledger once before writing the tx off.
+  const status = await conn
+    .getSignatureStatus(signature, { searchTransactionHistory: true })
+    .catch(() => null);
+  const value = status?.value ?? null;
+  const landed = value && !value.err &&
+    (value.confirmationStatus === "confirmed" || value.confirmationStatus === "finalized" || (value.confirmations ?? 0) > 0);
+  if (landed) {
+    log(
+      "tx",
+      `${label} landed despite confirm timeout (${elapsedMs}ms, ${rebroadcasts} rebroadcast(s), fee ${fee.micro} µLamports/CU): ${signature}`,
+    );
+    return signature;
+  }
+
+  const error = new Error(
+    value?.err
+      ? `${label} failed on-chain: ${JSON.stringify(value.err)}`
+      : `${label} expired: no confirmation in ${elapsedMs}ms after ${rebroadcasts} rebroadcast(s) (fee ${fee.micro} µLamports/CU, ${fee.source})`,
+  );
+  error.signature = signature;
+  throw error;
+}
+
+// The pool account is the contended writable account for every DLMM tx, so it is
+// what the dynamic priority fee should be priced against.
+function poolWritableAccounts(pool) {
+  const key = pool?.pubkey?.toString?.()
+    || pool?.lbPair?.publicKey?.toString?.()
+    || pool?.lbPair?.pubkey?.toString?.()
+    || null;
+  return key ? [key] : [];
 }
 
 function shouldUseLpAgentRelay() {
@@ -401,8 +662,11 @@ async function getPool(poolAddress) {
   return poolCache.get(key);
 }
 
-setInterval(() => poolCache.clear(), 5 * 60 * 1000);
-setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000);
+// unref'd: these are pure cache evictions, nothing depends on them running, and
+// an un-unref'd module-level interval keeps any process that merely imports this
+// file alive forever (which is what made the module untestable).
+setInterval(() => poolCache.clear(), 5 * 60 * 1000).unref?.();
+setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000).unref?.();
 
 async function getPoolMetadata(poolAddress) {
   const key = String(poolAddress);
@@ -480,7 +744,8 @@ async function closeEmptyWidePosition(pool, positionPubkey, wallet) {
     });
     const txs = Array.isArray(tx) ? tx : [tx];
     for (const t of txs) {
-      await sendAndConfirmTransaction(getConnection(), t, [wallet]);
+      // Measured 19k CU for the position-account path; 200k is generous headroom.
+      await sendTx(t, [wallet], { label: "close_empty_position", cuLimit: 200_000, writableAccounts: poolWritableAccounts(pool) });
     }
     log("deploy", `Closed empty wide position ${positionPubkey.toString().slice(0, 8)} — rent reclaimed`);
   } catch (error) {
@@ -982,7 +1247,12 @@ export async function deployPosition({
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
       for (let i = 0; i < createTxArray.length; i++) {
         const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
+        // createExtendedEmptyPosition measured at ~19k CU.
+        const txHash = await sendTx(createTxArray[i], signers, {
+          label: `deploy_create ${i + 1}/${createTxArray.length}`,
+          cuLimit: 200_000,
+          writableAccounts: poolWritableAccounts(pool),
+        });
         txHashes.push(txHash);
         log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
       }
@@ -1006,7 +1276,11 @@ export async function deployPosition({
       let executedChunks = 0;
       for (let i = 0; i < addTxArray.length; i++) {
         try {
-          const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
+          // Heaviest tx in the system — measured 453-685k CU on 135-bin chunks.
+          const txHash = await sendTx(addTxArray[i], [wallet], {
+            label: `deploy_add ${i + 1}/${addTxArray.length}`,
+            writableAccounts: poolWritableAccounts(pool),
+          });
           txHashes.push(txHash);
           executedChunks++;
           log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
@@ -1042,7 +1316,13 @@ export async function deployPosition({
         strategy: { maxBinId, minBinId, strategyType },
         slippage: 1000, // 10% in bps
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, newPosition]);
+      // ≤69 bins in one tx — never exercised in era #9 (135 bins always take the
+      // wide path) and therefore unmeasured, so keep the full 1.4M block budget.
+      const txHash = await sendTx(tx, [wallet, newPosition], {
+        label: "deploy_standard",
+        cuLimit: 1_400_000,
+        writableAccounts: poolWritableAccounts(pool),
+      });
       txHashes.push(txHash);
     }
 
@@ -1823,7 +2103,12 @@ export async function claimFees({ position_address }) {
 
     const txHashes = [];
     for (const tx of txs) {
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+      // Claim-only measured 115-124k CU.
+      const txHash = await sendTx(tx, [wallet], {
+        label: "claim",
+        cuLimit: 300_000,
+        writableAccounts: poolWritableAccounts(pool),
+      });
       txHashes.push(txHash);
     }
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
@@ -1883,6 +2168,12 @@ export async function closePosition({ position_address, reason }) {
   }
 
   const tracked = getTrackedPosition(position_address);
+  // Trailing-exit forensics, captured BEFORE any close tx runs (era #9 task 3).
+  const trailingTrace = getTrailingTrace(position_address, config.management.trailingDropPct);
+  // Signature ledgers live OUTSIDE the try: an exception mid-close must not take
+  // the signatures of the txs that already landed with it (see recordCloseTxAttempt).
+  const claimTxHashes = [];
+  const closeTxHashes = [];
   // Exit-slippage instrumentation (step 1): timestamps for each close stage so the
   // close→swap latency can be decomposed at review time. Observability only.
   const closeSignalAtMs = Date.now();
@@ -2193,8 +2484,29 @@ export async function closePosition({ position_address, reason }) {
     const preCloseSnap = _positionsCache?.positions?.find((p) => p.position === position_address) || null;
 
     const positionPubKey = new PublicKey(position_address);
-    const claimTxHashes = [];
-    const closeTxHashes = [];
+    // Submit one close-path tx, recording the signature in state BEFORE we know
+    // the outcome and re-attaching it to the error on failure. A timed-out tx is
+    // still a submitted tx: it may have landed, and either way the cash
+    // reconciliation has to know it exists.
+    const sendClosePathTx = async (tx, { label, cuLimit, bucket }) => {
+      let signature = null;
+      try {
+        signature = await sendTx(tx, [wallet], {
+          label,
+          cuLimit,
+          writableAccounts: poolWritableAccounts(pool),
+        });
+        bucket.push(signature);
+        recordCloseTxAttempt(position_address, signature);
+        return signature;
+      } catch (error) {
+        if (error.signature) {
+          recordCloseTxAttempt(position_address, error.signature);
+          error.close_path_signature = error.signature;
+        }
+        throw error;
+      }
+    };
 
     // ─── Step 1: Claim Fees (to clear account state) ───────────
     const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
@@ -2210,10 +2522,14 @@ export async function closePosition({ position_address, reason }) {
         });
         if (claimTxs && claimTxs.length > 0) {
           for (const tx of claimTxs) {
-            const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-            claimTxHashes.push(claimHash);
+            await sendClosePathTx(tx, { label: "close_claim", cuLimit: 300_000, bucket: claimTxHashes });
           }
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
+          // Stamp last_claim_at so a RETRY of this close skips step 1 entirely.
+          // Without it the retry re-ran claimSwapFee on an already-drained
+          // position and logged "No fee to claim" — wasted tx, wasted time, and
+          // the exact signature of a non-idempotent retry (7 Aug three-SOL).
+          recordClaim(position_address);
         }
       }
       claimDoneAtMs = Date.now();
@@ -2222,6 +2538,9 @@ export async function closePosition({ position_address, reason }) {
     }
 
     // ─── Step 2: Remove Liquidity & Close ──────────────────────
+    // Read the CURRENT on-chain bin state every attempt and only work the bins
+    // that still hold liquidity, so a retry after a partially-executed close
+    // resumes where the previous attempt stopped instead of replaying it.
     let hasLiquidity = false;
     let closeFromBinId = -887272;
     let closeToBinId = 887272;
@@ -2232,7 +2551,16 @@ export async function closePosition({ position_address, reason }) {
         closeFromBinId = processed.lowerBinId ?? closeFromBinId;
         closeToBinId = processed.upperBinId ?? closeToBinId;
         const bins = Array.isArray(processed.positionBinData) ? processed.positionBinData : [];
-        hasLiquidity = bins.some((bin) => new BN(bin.positionLiquidity || "0").gt(new BN(0)));
+        const liquidBins = bins.filter((bin) => new BN(bin.positionLiquidity || "0").gt(new BN(0)));
+        hasLiquidity = liquidBins.length > 0;
+        if (hasLiquidity && liquidBins.every((bin) => bin.binId != null)) {
+          const ids = liquidBins.map((bin) => Number(bin.binId));
+          closeFromBinId = Math.min(...ids);
+          closeToBinId = Math.max(...ids);
+          if (liquidBins.length < bins.length) {
+            log("close", `Step 2: ${liquidBins.length}/${bins.length} bins still hold liquidity — removing ${closeFromBinId}..${closeToBinId} only`);
+          }
+        }
       }
     } catch (e) {
       log("close_warn", `Could not check liquidity state: ${e.message}`);
@@ -2249,9 +2577,14 @@ export async function closePosition({ position_address, reason }) {
         shouldClaimAndClose: true,
       });
 
-      for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-        closeTxHashes.push(txHash);
+      const closeTxArray = Array.isArray(closeTx) ? closeTx : [closeTx];
+      for (let i = 0; i < closeTxArray.length; i++) {
+        // remove+claim+close measured 375-388k CU on 135-bin positions.
+        await sendClosePathTx(closeTxArray[i], {
+          label: `close_remove ${i + 1}/${closeTxArray.length}`,
+          cuLimit: 700_000,
+          bucket: closeTxHashes,
+        });
       }
     } else {
       log("close", `Step 2: No position liquidity detected, closing account`);
@@ -2259,8 +2592,7 @@ export async function closePosition({ position_address, reason }) {
         owner: wallet.publicKey,
         position: { publicKey: positionPubKey },
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
-      closeTxHashes.push(txHash);
+      await sendClosePathTx(closeTx, { label: "close_account", cuLimit: 200_000, bucket: closeTxHashes });
     }
     closeTxDoneAtMs = Date.now();
     const txHashes = [...claimTxHashes, ...closeTxHashes];
@@ -2295,6 +2627,7 @@ export async function closePosition({ position_address, reason }) {
         pool: poolAddress,
         claim_txs: claimTxHashes,
         close_txs: closeTxHashes,
+        close_tx_attempts: getCloseTxAttempts(position_address),
         txs: txHashes,
       };
     }
@@ -2474,6 +2807,10 @@ export async function closePosition({ position_address, reason }) {
         entry_fee_tvl_slow: tracked.entry_fee_tvl_slow ?? null,
         fee_gate_timeframe: tracked.fee_gate_timeframe ?? null,
         pnl_settle_ms: pnlSettleMs,
+        // Trailing-exit forensics (era #9 task 3). Present on every close so the
+        // healthy trailing exits provide the baseline the overshoots are measured
+        // against; null-ish on closes that never armed trailing.
+        ...(trailingTrace || {}),
         ...exitMarket,
       });
 
@@ -2513,6 +2850,7 @@ export async function closePosition({ position_address, reason }) {
         pool_name: tracked.pool_name || poolMeta.name || null,
         claim_txs: claimTxHashes,
         close_txs: closeTxHashes,
+        close_tx_attempts: getCloseTxAttempts(position_address),
         txs: txHashes,
         pnl_usd: provUsd,
         pnl_true_usd: provTrueUsd,
@@ -2542,13 +2880,27 @@ export async function closePosition({ position_address, reason }) {
       pool_name: poolMeta.name || null,
       claim_txs: claimTxHashes,
       close_txs: closeTxHashes,
+      close_tx_attempts: getCloseTxAttempts(position_address),
       txs: txHashes,
       base_mint: pool.lbPair.tokenXMint.toString(),
       close_timing: buildCloseTiming(),
     };
   } catch (error) {
     log("close_error", error.message);
-    return { success: false, error: error.message };
+    // The failure path MUST carry the signatures too. Everything submitted so far
+    // is also in state.close_tx_attempts, but the executor reconciles the union of
+    // both — a caller that only ever sees `{success:false, error}` is how -8.3 SOL
+    // of phantom losses got booked in era #9.
+    const attempts = getCloseTxAttempts(position_address);
+    return {
+      success: false,
+      error: error.message,
+      position: position_address,
+      claim_txs: claimTxHashes,
+      close_txs: closeTxHashes,
+      close_tx_attempts: attempts,
+      txs: [...new Set([...claimTxHashes, ...closeTxHashes, ...attempts])],
+    };
   }
 }
 
