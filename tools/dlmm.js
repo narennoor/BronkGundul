@@ -27,7 +27,7 @@ import {
   minutesOutOfRange,
   syncOpenPositions,
 } from "../state.js";
-import { recordPerformance } from "../lessons.js";
+import { recordPerformance, hasPerformanceRecord } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { getWalletBalances, normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
@@ -345,25 +345,47 @@ export async function sendTx(tx, signers, opts = {}) {
   }
 
   // Confirmation timed out or the subscription failed. "Expired" is frequently a
-  // lie — check the ledger once before writing the tx off.
-  const status = await conn
-    .getSignatureStatus(signature, { searchTransactionHistory: true })
-    .catch(() => null);
-  const value = status?.value ?? null;
-  const landed = value && !value.err &&
-    (value.confirmationStatus === "confirmed" || value.confirmationStatus === "finalized" || (value.confirmations ?? 0) > 0);
-  if (landed) {
+  // lie — check the ledger before writing the tx off. One single check is not
+  // enough: 12 Aug 2026 04:01–05:34 six close_remove txs were declared expired
+  // while every one of them had landed. Two holes in the old single check, both
+  // open exactly when the RPC's confirmation path is degraded (which is when
+  // this code runs at all): a status lookup that errored was swallowed into
+  // "expired", and a tx whose last rebroadcast landed seconds after the timeout
+  // (XST-SOL landed at 04:01:16, verdict fell at 04:01) was checked too early.
+  // So recheck the signature — every rebroadcast reuses the same one — several
+  // times before giving up. Presence in the ledger without an error counts as
+  // landed even at "processed": waiting out its confirmation elsewhere beats
+  // declaring a landed tx expired and ghosting the cycle from the books.
+  const recheckAttempts = Math.max(1, Number(opts.finalRecheckAttempts ?? 4));
+  const recheckDelayMs = Math.max(0, Number(opts.finalRecheckDelayMs ?? 2_500));
+  let lastValue = null;
+  let statusErrors = 0;
+  for (let attempt = 0; attempt < recheckAttempts; attempt++) {
+    if (attempt > 0) await sleep(recheckDelayMs);
+    let status = null;
+    try {
+      status = await conn.getSignatureStatus(signature, { searchTransactionHistory: true });
+    } catch {
+      statusErrors++;
+      continue;
+    }
+    const value = status?.value ?? null;
+    if (!value) continue; // not in the ledger (yet) — a late rebroadcast may still land
+    lastValue = value;
+    if (value.err) break; // definitive on-chain failure
     log(
       "tx",
-      `${label} landed despite confirm timeout (${elapsedMs}ms, ${rebroadcasts} rebroadcast(s), fee ${fee.micro} µLamports/CU): ${signature}`,
+      `${label} landed despite confirm timeout (${Date.now() - startedAt}ms, ${rebroadcasts} rebroadcast(s), recheck ${attempt + 1}/${recheckAttempts}, status ${value.confirmationStatus || "?"}, fee ${fee.micro} µLamports/CU): ${signature}`,
     );
     return signature;
   }
 
   const error = new Error(
-    value?.err
-      ? `${label} failed on-chain: ${JSON.stringify(value.err)}`
-      : `${label} expired: no confirmation in ${elapsedMs}ms after ${rebroadcasts} rebroadcast(s) (fee ${fee.micro} µLamports/CU, ${fee.source})`,
+    lastValue?.err
+      ? `${label} failed on-chain: ${JSON.stringify(lastValue.err)}`
+      : `${label} expired: no confirmation in ${elapsedMs}ms after ${rebroadcasts} rebroadcast(s) + ${recheckAttempts} final recheck(s)` +
+        (statusErrors ? ` — ${statusErrors} status lookup(s) failed, landing NOT ruled out` : "") +
+        ` (fee ${fee.micro} µLamports/CU, ${fee.source})`,
   );
   error.signature = signature;
   throw error;
@@ -1764,6 +1786,106 @@ export function countablePositions(result) {
   return positions.length;
 }
 
+// ── State-sync auto-close bookkeeping ──────────────────────────
+// syncOpenPositions closing a position it can no longer find on-chain used to
+// be a silent state mutation: no performance record, no cash entry. 12 Aug 2026
+// 04:01 (XST-SOL): two close_remove txs were falsely declared expired, the
+// manager gave up, state sync noticed the position was gone — and a 2.43 SOL
+// cycle vanished from the books until it was backfilled by hand; the same
+// morning the pattern hit 4 more cycles (−11.07 SOL of phantom loss). This
+// path now books every sync auto-close: a performance record first (settled
+// PnL from the datapi when it is already indexed, zeros otherwise — the
+// reconcile cron patches those), then a position-account cash scan
+// (recheckCash) for sol_cycle_net. The close signatures are unknown on this
+// path by definition, so the scan is the only source of truth for the cash;
+// until it lands the entry carries cash_complete:false, which is exactly what
+// the recheck suspect filter keys on.
+
+const SYNC_CLOSE_BOOKKEEP_DELAY_MS = 90_000;
+
+export async function bookkeepSyncAutoClosed(autoClosed, opts = {}) {
+  const delayMs = Number(opts.delayMs ?? SYNC_CLOSE_BOOKKEEP_DELAY_MS);
+  const fetchImpl = opts.fetchImpl || fetch;
+  const recheck = opts.recheck || (async (positions) => {
+    const { recheckCash } = await import("../pnl-reconciler.js");
+    return recheckCash({ positions });
+  });
+
+  for (const pos of autoClosed || []) {
+    if (!pos?.position || pos.dry) continue;
+    try {
+      // A live closePosition may be racing this: its txs landed, sync saw the
+      // position gone, but its bookkeeping hasn't written yet. Let the close
+      // path's richer record win — wait it out, then dedupe by address.
+      const pending = _pendingCloseBookkeeping.get(pos.position);
+      if (pending) await pending.catch(() => {});
+      if (delayMs > 0) await sleep(delayMs);
+      if (hasPerformanceRecord(pos.position)) continue;
+
+      // Settled PnL, if the datapi has the close indexed by now. Best-effort:
+      // on any miss the record is written with zeros and reconcileClosedPnl
+      // patches it on the next cron pass.
+      let settled = null;
+      let walletAddress = null;
+      try { walletAddress = getWallet().publicKey.toString(); } catch { /* no wallet configured */ }
+      if (pos.pool && walletAddress) {
+        try {
+          const url = `https://dlmm.datapi.meteora.ag/positions/${pos.pool}/pnl?user=${walletAddress}&status=closed&pageSize=50&page=1`;
+          const res = await fetchImpl(url);
+          if (res.ok) {
+            const data = await res.json();
+            settled = (data.positions || []).find((p) => p.positionAddress === pos.position) || null;
+          }
+        } catch { /* non-blocking */ }
+      }
+
+      const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+      const deployedAt = pos.deployed_at ? new Date(pos.deployed_at).getTime() : Date.now();
+      const closedAt = pos.closed_at ? new Date(pos.closed_at).getTime() : Date.now();
+      const minutesHeld = Math.max(0, Math.floor((closedAt - deployedAt) / 60000));
+      let minutesOOR = 0;
+      if (pos.out_of_range_since) {
+        minutesOOR = Math.min(minutesHeld, Math.max(0, Math.floor((closedAt - new Date(pos.out_of_range_since).getTime()) / 60000)));
+      }
+      const pnlSol = num(settled?.pnlSol) ?? num(settled?.pnl?.valueNative);
+
+      await recordPerformance({
+        position: pos.position,
+        pool: pos.pool || null,
+        pool_name: pos.pool_name || String(pos.pool || pos.position).slice(0, 8),
+        base_mint: pos.base_mint ?? null,
+        strategy: pos.strategy || null,
+        bin_range: pos.bin_range || null,
+        amount_sol: pos.amount_sol ?? null,
+        fees_earned_usd: num(settled?.allTimeFees?.total?.usd) ?? (pos.total_fees_claimed_usd || 0),
+        final_value_usd: num(settled?.allTimeWithdrawals?.total?.usd) ?? 0,
+        initial_value_usd: num(settled?.allTimeDeposits?.total?.usd) ?? 0,
+        ...(pnlSol != null ? { pnl_sol: Math.round(pnlSol * 10000) / 10000 } : {}),
+        withdrawals_sol: num(settled?.allTimeWithdrawals?.total?.sol),
+        deposits_sol: num(settled?.allTimeDeposits?.total?.sol),
+        fees_earned_sol: num(settled?.allTimeFees?.total?.sol),
+        minutes_in_range: minutesHeld - minutesOOR,
+        minutes_held: minutesHeld,
+        close_reason: "state-sync auto-close (not found on-chain)",
+        exit_execution: {
+          cash_complete: false,
+          cash_source: "state-sync auto-close (pending position-account scan)",
+        },
+      });
+      log("state", `Booked sync auto-close for ${pos.pool_name || pos.position.slice(0, 8)} (${minutesHeld}m held, settled PnL ${settled ? "from datapi" : "pending reconcile"})`);
+
+      const result = await recheck([pos.position]);
+      if (result?.patched) {
+        log("reconcile", `Cash recheck after sync auto-close: ${pos.pool_name || pos.position.slice(0, 8)} sol_cycle_net ${result.patches?.[0]?.after}`);
+      } else {
+        log("reconcile_warn", `Cash recheck after sync auto-close found nothing for ${pos.position.slice(0, 8)} — entry stays cash_complete:false for the next recheck run`);
+      }
+    } catch (e) {
+      log("state_error", `Sync auto-close bookkeeping failed for ${String(pos.position).slice(0, 8)}: ${e.message}`);
+    }
+  }
+}
+
 export async function getMyPositions({ force = false, silent = false, wallet_address = null } = {}) {
   let walletOverride = null;
   try {
@@ -1795,7 +1917,8 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         const rpcResult = await computePositions(walletAddress);
         if (useLocalWallet) {
           await appendDryPositions(rpcResult);
-          syncOpenPositions(rpcResult.positions.map((p) => p.position));
+          const autoClosed = syncOpenPositions(rpcResult.positions.map((p) => p.position));
+          if (autoClosed.length) void bookkeepSyncAutoClosed(autoClosed);
           _positionsCache = rpcResult;
           _positionsCacheAt = Date.now();
         }
@@ -1978,7 +2101,8 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
     };
     if (useLocalWallet) {
       await appendDryPositions(result);
-      syncOpenPositions(result.positions.map(p => p.position));
+      const autoClosed = syncOpenPositions(result.positions.map(p => p.position));
+      if (autoClosed.length) void bookkeepSyncAutoClosed(autoClosed);
       _positionsCache = result;
       _positionsCacheAt = Date.now();
     }

@@ -63,13 +63,14 @@ function mockConnection({ confirm = "ok", status = "missing", pollStatus = "miss
       const mode = opts?.searchTransactionHistory ? status : pollStatus;
       if (opts?.searchTransactionHistory) calls.statusChecks++; else calls.polls++;
       if (mode === "landed") return { value: { err: null, confirmationStatus: "confirmed", confirmations: 3 } };
+      if (mode === "processed") return { value: { err: null, confirmationStatus: "processed", confirmations: 0 } };
       if (mode === "err") return { value: { err: { InstructionError: [0, "Custom"] }, confirmationStatus: "confirmed" } };
       return { value: null };
     },
   };
 }
 
-const fast = { confirmTimeoutMs: 300, rebroadcastIntervalMs: 50 };
+const fast = { confirmTimeoutMs: 300, rebroadcastIntervalMs: 50, finalRecheckDelayMs: 10 };
 
 test("(a) prepends ComputeBudget limit + price instructions", async () => {
   const payer = Keypair.generate();
@@ -168,7 +169,7 @@ test("(c) confirm timeout still returns the signature when the tx actually lande
   assert.equal(conn.calls.statusChecks, 1);
 });
 
-test("(c2) a genuinely expired tx throws WITH its signature attached", async () => {
+test("(c2) a genuinely expired tx throws WITH its signature attached, after several rechecks", async () => {
   const payer = Keypair.generate();
   const conn = mockConnection({ confirm: "timeout", status: "missing" });
 
@@ -179,6 +180,89 @@ test("(c2) a genuinely expired tx throws WITH its signature attached", async () 
   assert.match(error.message, /expired/);
   assert.equal(typeof error.signature, "string", "signature must survive the failure — the cash tracker needs it");
   assert.ok(error.signature.length > 40);
+  assert.equal(conn.calls.statusChecks, 4,
+    "one status check is not enough — 12 Aug 2026 declared six landed txs expired off a single look");
+});
+
+// ── The 12 Aug 2026 expired-but-landed cluster ─────────────────────────────
+// Six close_remove txs between 04:01 and 05:34 UTC were declared "expired: no
+// confirmation after 6 rebroadcast(s)" while every one of them had landed
+// (XST-SOL's landed 03:59:51 and 04:01:16). The RPC's confirmation path was
+// degraded, and the OLD final check looked exactly once: a status lookup that
+// errored — or ran before the last rebroadcast reached the ledger — read as
+// "not landed". Each false expired ghosted a whole cycle from the books
+// (−11.07 SOL of phantom loss before recheck-cash corrected it).
+
+test("(e) a status lookup that errors is retried, not read as expired", async () => {
+  const payer = Keypair.generate();
+  const conn = mockConnection({ confirm: "timeout" });
+  const poll = conn.getSignatureStatus.bind(conn);
+  let historyCalls = 0;
+  conn.getSignatureStatus = async (sig, opts) => {
+    if (!opts?.searchTransactionHistory) return poll(sig, opts); // in-loop poll: missing
+    conn.calls.statusChecks++;
+    historyCalls++;
+    if (historyCalls <= 2) throw new Error("RPC degraded"); // the 12 Aug condition
+    return { value: { err: null, confirmationStatus: "confirmed", confirmations: 1 } };
+  };
+
+  const sig = await sendTx(buildTx(payer), [payer], { label: "close_remove", connection: conn, ...fast });
+
+  assert.equal(typeof sig, "string", "the tx HAD landed — two failed lookups must not become 'expired'");
+  assert.equal(conn.calls.statusChecks, 3);
+});
+
+test("(e2) a tx still at 'processed' in the final recheck is landed, not expired", async () => {
+  // Processed = in a block with no error, confirmations 0. The old predicate
+  // required confirmed/finalized/confirmations>0, so a tx checked seconds after
+  // its last rebroadcast landed was declared expired.
+  const payer = Keypair.generate();
+  const conn = mockConnection({ confirm: "timeout", status: "processed" });
+
+  const sig = await sendTx(buildTx(payer), [payer], { label: "close_remove", connection: conn, ...fast });
+
+  assert.equal(typeof sig, "string");
+  assert.equal(conn.calls.statusChecks, 1);
+});
+
+test("(e3) a rebroadcast landing seconds after the timeout is caught by a later recheck", async () => {
+  // XST-SOL 04:01: the verdict fell at ~04:01, the tx landed 04:01:16.
+  const payer = Keypair.generate();
+  const conn = mockConnection({ confirm: "timeout" });
+  const poll = conn.getSignatureStatus.bind(conn);
+  let historyCalls = 0;
+  conn.getSignatureStatus = async (sig, opts) => {
+    if (!opts?.searchTransactionHistory) return poll(sig, opts);
+    conn.calls.statusChecks++;
+    historyCalls++;
+    if (historyCalls === 1) return { value: null }; // not in the ledger yet
+    return { value: { err: null, confirmationStatus: "confirmed", confirmations: 2 } };
+  };
+
+  const sig = await sendTx(buildTx(payer), [payer], { label: "close_remove", connection: conn, ...fast });
+
+  assert.equal(typeof sig, "string");
+  assert.equal(conn.calls.statusChecks, 2);
+});
+
+test("(e4) when every status lookup fails, the error says landing was NOT ruled out", async () => {
+  const payer = Keypair.generate();
+  const conn = mockConnection({ confirm: "timeout" });
+  const poll = conn.getSignatureStatus.bind(conn);
+  conn.getSignatureStatus = async (sig, opts) => {
+    if (!opts?.searchTransactionHistory) return poll(sig, opts);
+    conn.calls.statusChecks++;
+    throw new Error("RPC degraded");
+  };
+
+  const error = await sendTx(buildTx(payer), [payer], { label: "close_remove", connection: conn, ...fast })
+    .then(() => null, (e) => e);
+
+  assert.ok(error);
+  assert.match(error.message, /landing NOT ruled out/,
+    "an operator reading the log must be able to tell 'not in ledger' from 'could not check'");
+  assert.equal(typeof error.signature, "string");
+  assert.equal(conn.calls.statusChecks, 4, "all rechecks attempted before giving up");
 });
 
 test("(d) the ledger is checked before declaring failure, and an on-chain error is reported as such", async () => {

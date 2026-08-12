@@ -10,8 +10,9 @@
 //     Rebuilds sol_cycle_net from the chain by walking each position account's
 //     own signature history, instead of trusting the signatures the close path
 //     managed to hand over. With no --positions it recomputes every close in
-//     the window whose measured inflow disagrees with Meteora's withdrawals by
-//     more than 1% of the deposit; --all recomputes the window regardless.
+//     the window that the live path's own verdict (evaluateCashMismatch — rent
+//     refund allowed) flags, plus anything still cash_complete:false; --all
+//     recomputes the window regardless.
 import { loadEnv } from "../envcrypt.js";
 
 loadEnv();

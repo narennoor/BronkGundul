@@ -607,13 +607,20 @@ export function setLastBriefingDate() {
 /**
  * Reconcile local state with actual on-chain positions.
  * Marks any local open positions as closed if they are not in the on-chain list.
+ *
+ * Returns a snapshot of every position it auto-closed (each with its own
+ * `position` address merged in). The caller MUST book those cycles — an
+ * auto-close used to be a silent state mutation, and on 12 Aug 2026 that made
+ * a 2.43 SOL XST-SOL cycle vanish from performance/cash entirely when its
+ * close txs were falsely declared expired (see bookkeepSyncAutoClosed in
+ * tools/dlmm.js).
  */
 const SYNC_GRACE_MS = 5 * 60_000; // don't auto-close positions deployed < 5 min ago
 
 export function syncOpenPositions(active_addresses) {
   const state = load();
   const activeSet = new Set(active_addresses);
-  let changed = false;
+  const autoClosed = [];
 
   for (const posId in state.positions) {
     const pos = state.positions[posId];
@@ -629,9 +636,10 @@ export function syncOpenPositions(active_addresses) {
     pos.closed = true;
     pos.closed_at = new Date().toISOString();
     pos.notes.push(`Auto-closed during state sync (not found on-chain)`);
-    changed = true;
+    autoClosed.push({ position: posId, ...structuredClone(pos) });
     log("state", `Position ${posId} auto-closed (missing from on-chain data)`);
   }
 
-  if (changed) save(state);
+  if (autoClosed.length) save(state);
+  return autoClosed;
 }

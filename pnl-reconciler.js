@@ -14,6 +14,8 @@ import bs58 from "bs58";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { repoPath } from "./repo-root.js";
 import { log } from "./logger.js";
+import { config } from "./config.js";
+import { evaluateCashMismatch } from "./tools/wallet.js";
 
 const SETTLE_GRACE_MINUTES = 10;  // closes younger than this are still the close path's job
 const GIVE_UP_HOURS = 72;         // flag entries the API never returned so we stop refetching
@@ -223,6 +225,37 @@ async function walletDeltaFor(connection, walletAddr, signature) {
 const round9 = (n) => Math.round(n * 1e9) / 1e9;
 
 /**
+ * Does this performance entry's cash bookkeeping deserve a rescan?
+ *
+ * The verdict must be the SAME one the live close path applies
+ * (evaluateCashMismatch), rent allowance included. The old inline filter here
+ * flagged any |inflow − withdrawals| > 1% of deposit — but the position-account
+ * rent refund (~0.109 SOL on a 135-bin position) exceeds 1% of every normal
+ * 2-3 SOL deposit, so a no-args `--recheck-cash` run considered virtually every
+ * healthy cycle suspect and set off rescanning hundreds of positions
+ * (12 Aug 2026). Pure, exported for tests.
+ */
+export function isCashSuspect(entry, tolerancePct = Number(config.tx?.cashMismatchTolerancePct ?? 1)) {
+  const x = entry?.exit_execution || {};
+  // The live cross-check (or the sync-close path) already declared these
+  // incomplete — always rescan-worthy, whatever the mismatch arithmetic says.
+  if (x.cash_complete === false) return true;
+  // A COMPLETE position-account scan is final: it measured every tx that ever
+  // touched the account, so re-running it returns the same figure every time.
+  // Without this, a close whose Meteora cross-check stays odd even after the
+  // scan (LOUIE-SOL 11 Aug: surplus beyond one rent, scan-verified correct)
+  // would be rescanned by every single default run, forever.
+  if (x.cash_complete === true && String(x.cash_source || "").includes("position-account scan")) return false;
+  const { over_tolerance } = evaluateCashMismatch({
+    inflowSol: (x.sol_in_close ?? 0) + (x.sol_in_swap ?? 0),
+    withdrawalsSol: entry?.withdrawals_sol,
+    depositBasisSol: entry?.deposits_sol ?? entry?.amount_sol ?? 0,
+    tolerancePct,
+  });
+  return over_tolerance;
+}
+
+/**
  * Recompute the on-chain cash figures for closed positions and patch
  * lessons.json.
  *
@@ -249,13 +282,7 @@ export async function recheckCash({ positions = [], lookbackHours = 168, dryRun 
     const t = new Date(p.recorded_at).getTime();
     if (!Number.isFinite(t) || t < cutoff) return false;
     if (all) return true;
-    // Suspect = our measured inflow disagrees with Meteora's withdrawals by
-    // more than 1% of the deposit. Exactly the gate the live path now applies.
-    const x = p.exit_execution || {};
-    const inflow = (x.sol_in_close ?? 0) + (x.sol_in_swap ?? 0);
-    const basis = Math.abs(p.deposits_sol ?? p.amount_sol ?? 0);
-    if (!basis || p.withdrawals_sol == null) return false;
-    return Math.abs(inflow - p.withdrawals_sol) > basis * 0.01;
+    return isCashSuspect(p);
   });
   if (!targets.length) return { checked: 0, patched: 0, patches: [] };
 

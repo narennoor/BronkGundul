@@ -94,6 +94,18 @@ function buildSignalSnapshot(perf) {
  * @param {number} perf.minutes_held      - Total minutes position was held
  * @param {string} perf.close_reason   - Why it was closed
  */
+/**
+ * Whether a performance entry already exists for this position address.
+ * Used by the sync-auto-close bookkeeping to defer to a live closePosition
+ * call that raced it — position accounts are never reused, so the address is
+ * a safe dedupe key.
+ */
+export function hasPerformanceRecord(position_address) {
+  if (!position_address) return false;
+  const data = load();
+  return (data.performance || []).some((p) => p.position === position_address);
+}
+
 export async function recordPerformance(perf) {
   const data = load();
 
