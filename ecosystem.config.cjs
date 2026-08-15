@@ -2,10 +2,15 @@ const path = require("path");
 
 const repoRoot = __dirname;
 
+// The pm2 app name follows the repo directory name, so several copies of this
+// repo (CopetGundul, BronkGundul, …) can run side by side on one box without
+// colliding. Keep pm2:restart / pm2:logs in package.json deriving it the same way.
+const appName = path.basename(repoRoot);
+
 module.exports = {
   apps: [
     {
-      name: "meridian",
+      name: appName,
       script: path.join(repoRoot, "index.js"),
       cwd: repoRoot,
       interpreter: "node",
