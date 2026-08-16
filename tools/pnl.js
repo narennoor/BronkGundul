@@ -125,9 +125,17 @@ const hasDeposits = (d) =>
 // once the remaining chunks indexed). Deploys are single-side SOL and
 // state.json tracks the true amount (the partial-adoption path records the
 // actual on-chain amount), so the indexed SOL deposit total must cover the
-// tracked amount before a tick's PnL is trusted. The 0.9 ratio absorbs datapi
-// valuation noise while still catching any missing chunk (chunks are ≥~25%).
-export const DEPOSIT_COMPLETE_MIN_RATIO = 0.9;
+// tracked amount before a tick's PnL is trusted.
+// The ratio was 0.9 on the assumption that chunks are ≥~25% of the deploy —
+// wrong for bid_ask's uneven bin weighting: MEOW-SOL 16 Aug 2026 split
+// 1.6357 + 0.1743 SOL (last chunk 9.6%), indexed ratio 90.4% slipped past
+// the guard and the phantom +10.66% tick armed-and-fired the trailing TP 31s
+// after deploy. Deposit sol totals are exact lamport sums (no valuation
+// noise — that only affects the usd totals), so the tolerance only needs to
+// absorb float rounding; anything below 99.5% means a missing chunk. A
+// too-strict flag is also self-healing: depositsIncomplete puts the pool on
+// the short retry TTL, so the tick unblocks as soon as the datapi catches up.
+export const DEPOSIT_COMPLETE_MIN_RATIO = 0.995;
 export function isDepositPartiallyIndexed(entry, trackedAmountSol) {
   const expected = safeNum(trackedAmountSol);
   if (expected <= 0) return false; // untracked position — nothing to verify against
