@@ -72,6 +72,7 @@
   "minVolumeToRebalance": 1000,
   "stopLossPct": -50,
   "takeProfitPct": 5,
+  "hardTakeProfitPct": null,
   "minFeePerTvl24h": 7,
   "minAgeBeforeYieldCheck": 60,
   "trailingTakeProfit": true,

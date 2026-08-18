@@ -524,6 +524,24 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     };
   }
 
+  // ── Hard take profit (ceiling fast-path) ───────────────────────
+  // Fires on a single trusted tick — the poller closes it with no confirm
+  // streak and no RULE_2 hold. A spike big enough to clear this ceiling is
+  // exactly the tick that won't survive multi-tick confirmation (GUNICORN
+  // 16 Aug 2026: +38.21% → -16.16% in ~6s), and exiting at a wick top is the
+  // point, not a hazard. Suspicious ticks are excluded the same way as every
+  // other PnL rule. Checked BEFORE trailing so an armed position at the
+  // ceiling exits here instead of waiting for a drop-from-peak.
+  const hardTpPct = mgmtConfig.hardTakeProfitPct;
+  if (!pnl_pct_suspicious && currentPnlPct != null && hardTpPct != null && hardTpPct > 0 && currentPnlPct >= hardTpPct) {
+    return {
+      action: "HARD_TP",
+      reason: `hard take profit: +${currentPnlPct.toFixed(2)}% >= ${hardTpPct}%`,
+      current_pnl_pct: currentPnlPct,
+      hard_take_profit: true,
+    };
+  }
+
   // ── Trailing TP ────────────────────────────────────────────────
   if (!pnl_pct_suspicious && pos.trailing_active) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;

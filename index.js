@@ -863,8 +863,11 @@ Summarize the current portfolio health, total fees earned, and performance of al
         // Require N consecutive confirming ticks before acting. Take profit (RULE_2)
         // must also persist tpConfirmSec — two ticks 3s apart can both catch the same
         // price wick; a genuine TP survives the hold, a wick resets the streak.
+        // HARD_TP is the exception: one trusted tick at/above the hard ceiling closes
+        // NOW — a streak or hold is how GUNICORN's +38% became -16% (16 Aug 2026).
+        const ticksNeeded = signal === "HARD_TP" ? 1 : confirmTicks;
         const minSec = signal === "RULE_2" ? tpConfirmSec : 0;
-        const { fire } = registerExitSignal(p.position, signal, confirmTicks, minSec);
+        const { fire } = registerExitSignal(p.position, signal, ticksNeeded, minSec);
         if (!signal || !fire) continue;
 
         log("state", `[PnL poll] ${signal} confirmed (${confirmTicks} ticks): ${p.pair} — ${reason} — closing directly`);

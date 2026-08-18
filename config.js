@@ -154,6 +154,14 @@ export const config = {
     // an absent key still falls back to the default.
     stopLossPct:           ("stopLossPct" in u) ? u.stopLossPct : (u.emergencyPriceDropPct ?? -50),
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
+    // Hard take-profit ceiling — a single TRUSTED tick at/above this closes the
+    // position immediately from the fast poller: no trailing arm/drop, no
+    // confirm-tick streak, no RULE_2 hold. GUNICORN-SOL 16 Aug 2026: a trusted
+    // tick hit +38.21%, trailing armed at that peak, and ~6s later the next
+    // evaluation was already -16.16% — every multi-tick path is too slow for an
+    // inter-tick collapse. Suspicious ticks (pnl_pct_suspicious / phantom-PnL
+    // deposit guard) never trigger it. null/0 = OFF (default, opt-in).
+    hardTakeProfitPct:     ("hardTakeProfitPct" in u) ? u.hardTakeProfitPct : null,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
     // Max-hold guard — data (66 closes) shows positions held >120m avg -11% PnL; the two
