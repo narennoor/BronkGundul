@@ -6,18 +6,12 @@
 // past the threshold — 4 of 14 era #9 trailing closes overshot by 0.7-3.9pp.
 // The trace makes that measurable and the floor makes it bounded.
 //
-// state.json is backed up byte-for-byte and restored in a finally.
+// _setup.mjs isolates all state into a temp MERIDIAN_STATE_DIR — the live
+// state.json is never touched.
 
+import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-process.env.LOG_LEVEL = "error";
-
-const STATE_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "state.json");
-const backup = fs.existsSync(STATE_FILE) ? fs.readFileSync(STATE_FILE) : null;
 
 const { trackPosition, confirmPeak, updatePnlAndCheckExits, getTrailingTrace } = await import("../state.js");
 
@@ -51,11 +45,6 @@ function tick(address, pnlPct, cfg = ERA9) {
   confirmPeak(address, pnlPct, 1);
   return updatePnlAndCheckExits(address, { pnl_pct: pnlPct, in_range: true, fee_per_tvl_24h: 5, age_minutes: 30 }, cfg);
 }
-
-test.after(() => {
-  if (backup) fs.writeFileSync(STATE_FILE, backup);
-  else if (fs.existsSync(STATE_FILE)) fs.rmSync(STATE_FILE);
-});
 
 test("the tick trace records every trusted sample and the gap between them", () => {
   const pos = freshPosition();

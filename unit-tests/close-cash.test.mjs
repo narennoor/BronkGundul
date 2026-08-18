@@ -5,28 +5,17 @@
 // landed, so the cash reconciliation measured ~26% of the deposit coming back,
 // called itself complete, and booked a multi-SOL loss that never happened.
 //
-// state.json is backed up byte-for-byte and restored in a finally.
+// _setup.mjs isolates all state into a temp MERIDIAN_STATE_DIR — the live
+// state.json is never touched.
 
+import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-process.env.LOG_LEVEL = "error";
-
-const STATE_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "state.json");
-const backup = fs.existsSync(STATE_FILE) ? fs.readFileSync(STATE_FILE) : null;
 
 const { trackPosition, recordCloseTxAttempt, getCloseTxAttempts } = await import("../state.js");
 const { evaluateCashMismatch, dedupeCycleBuckets } = await import("../tools/wallet.js");
 
 const POS = "UNITTESTclose1111111111111111111111111111111";
-
-test.after(() => {
-  if (backup) fs.writeFileSync(STATE_FILE, backup);
-  else if (fs.existsSync(STATE_FILE)) fs.rmSync(STATE_FILE);
-});
 
 test("a 3-tx close whose 2nd tx times out keeps ALL three signatures", () => {
   trackPosition({

@@ -9,18 +9,12 @@
 // before trailing in updatePnlAndCheckExits, and the poller registers it
 // with confirmTicks=1 so registerExitSignal fires immediately.
 //
-// state.json is backed up byte-for-byte and restored in a finally.
+// _setup.mjs isolates all state into a temp MERIDIAN_STATE_DIR — the live
+// state.json is never touched.
 
+import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-process.env.LOG_LEVEL = "error";
-
-const STATE_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "state.json");
-const backup = fs.existsSync(STATE_FILE) ? fs.readFileSync(STATE_FILE) : null;
 
 const { trackPosition, confirmPeak, updatePnlAndCheckExits, registerExitSignal } = await import("../state.js");
 
@@ -55,11 +49,6 @@ function tick(address, pnlPct, cfg = ERA10) {
   confirmPeak(address, pnlPct, 1);
   return updatePnlAndCheckExits(address, { pnl_pct: pnlPct, in_range: true, fee_per_tvl_24h: 5, age_minutes: 30 }, cfg);
 }
-
-test.after(() => {
-  if (backup) fs.writeFileSync(STATE_FILE, backup);
-  else if (fs.existsSync(STATE_FILE)) fs.rmSync(STATE_FILE);
-});
 
 test("hard TP is OFF by default (null) — a huge spike arms trailing but does not exit", () => {
   const pos = freshPosition();
