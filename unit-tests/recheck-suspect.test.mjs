@@ -9,10 +9,9 @@
 // verdict as the live close path: evaluateCashMismatch, rent allowance
 // included. All numbers below are real cycles from lessons.json.
 
+import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-
-process.env.LOG_LEVEL = "error";
 
 const { isCashSuspect } = await import("../pnl-reconciler.js");
 

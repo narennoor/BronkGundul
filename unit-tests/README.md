@@ -4,12 +4,26 @@ Offline unit tests. **Not** `test/` — that directory holds live integration te
 that hit the real LLM, the real wallet, and the shared `state.json`, and must
 never be run while a daemon is up.
 
-Everything here runs against mocks or a backed-up copy of the state file:
+Everything here runs fully isolated from the live data files:
 
 - no RPC, no LLM, no network at all
 - no on-chain transaction is ever built against a real signer
-- `state.json` is byte-restored in a `finally`, so a crashed run cannot leave
-  the file dirty
+- every test file's **first import is `./_setup.mjs`**, which points
+  `MERIDIAN_STATE_DIR` at a fresh temp directory before any production module
+  loads. All `repoPath()` consumers (`state.js`, `lessons.js`, `pool-memory.js`,
+  `signal-weights.js`, `config.js`, `logger.js`, …) read and write there, so the
+  live `state.json` & friends are **never opened** — the suite is safe to run
+  while the daemon is up. (The old byte-snapshot/restore of the real files raced
+  the daemon's load+save loop — 18 Aug 2026: 22 phantom UNITTEST positions
+  leaked into production `state.json`.)
+- `_setup.mjs` refuses to run if `MERIDIAN_STATE_DIR` is pointed at the repo
+  root, so the suite cannot be aimed back at the live files even deliberately.
+- the auto-created temp dir is removed on process exit; pre-set
+  `MERIDIAN_STATE_DIR` to a scratch path yourself to inspect what a run writes.
+
+When adding a new test file, keep `import "./_setup.mjs";` as the **first**
+import — isolation only holds if the env var is set before `repo-root.js` (or
+anything importing it) is evaluated.
 
 Run:
 
@@ -17,11 +31,15 @@ Run:
 npm run test:unit
 ```
 
-`--test-concurrency=1` is deliberate: two files that both stub positions into
-`state.json` would race if they ran in parallel processes.
+`--test-concurrency=1` is deliberate: the suite is timing-sensitive (trailing
+recheck windows) and parallel files would contend for CPU. Each file already
+gets its own state dir, so there is no file-level race either way.
 
 | File | Covers |
 |---|---|
 | `sendtx.test.mjs` | `sendTx()` — compute-budget injection, rebroadcast loop, signature retention on confirm timeout, `getSignatureStatus` rescue (era #9 task 1) |
 | `close-cash.test.mjs` | close-signature accumulation across attempts + the Meteora cross-check arithmetic (era #9 task 2) |
 | `trailing.test.mjs` | trailing tick trace, overshoot fields, breakeven floor (era #9 task 3) |
+| `sync-close.test.mjs` | sync auto-close bookkeeping — snapshot return, pending-cash performance record, no double-booking (12 Aug 2026 incident) |
+| `recheck-suspect.test.mjs` | `isCashSuspect()` — the default recheck-cash filter, rent-refund allowance |
+| `hard-tp.test.mjs` | `hardTakeProfitPct` ceiling fast-path (era #10 GUNICORN incident) |

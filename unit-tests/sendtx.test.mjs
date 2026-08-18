@@ -7,11 +7,10 @@
 //   (c) the signature survives a confirmation timeout,
 //   (d) getSignatureStatus is consulted before a tx is declared failed.
 
+import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ComputeBudgetProgram, Keypair, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
-
-process.env.LOG_LEVEL = "error"; // keep the daily log file clean
 
 const { sendTx } = await import("../tools/dlmm.js");
 

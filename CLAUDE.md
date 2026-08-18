@@ -120,7 +120,7 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
 | **Other** | | |
 | `pnl-reconciler.js` | 400+ | `reconcileClosedPnl` re-fetches settled closed-PnL from the datapi and patches lessons/pool-memory. `recheckCash` (`scripts/reconcile-pnl.mjs --recheck-cash`) rebuilds `sol_cycle_net` from the chain by walking each **position account's** own signature history + the recorded swap tx — the repair path for closes whose signatures went missing. Both are read-modify-write on `lessons.json`; reload-before-write, but run them with the daemon paused. |
 | `discord-listener/`, `test/`, `scripts/`, `utils/` | | Discord listener (above), syntax-checked tests, envcrypt CLI, `safeNumber`. |
-| `unit-tests/` | | Offline `node:test` suite (`npm run test:unit`) — `sendTx`, close-signature accounting, trailing instrumentation. No network, no wallet; `state.json` is byte-restored. **Not** `test/`, which is live integration. |
+| `unit-tests/` | | Offline `node:test` suite (`npm run test:unit`) — `sendTx`, close-signature accounting, trailing instrumentation, sync-close bookkeeping, hard TP. No network, no wallet. Every test file's **first import is `unit-tests/_setup.mjs`**, which sets `MERIDIAN_STATE_DIR` to a fresh temp dir before any production module loads — all `repoPath()` consumers (state/lessons/pool-memory/config/logs/…) resolve there, so the live JSON files are never opened and the suite is safe to run while the daemon is up. `_setup.mjs` fail-fasts if `MERIDIAN_STATE_DIR` points at the repo root. (Replaced the old byte-snapshot/restore of `state.json`, which raced the daemon — 18 Aug 2026 incident.) **Not** `test/`, which is live integration. |
 | `.claude/agents/{screener,manager}.md` | | Claude Code sub-agent configs — used when you run `claude` inside the repo. |
 | `.claude/commands/*.md` | | Slash commands (`/screen`, `/manage`, `/balance`, `/candidates`, `/pool-ohlcv`, etc.) that wrap `cli.js`. |
 | `.claude/settings.json` | | Denies `rm -rf`, `wget`, `Read(./.env*)`. **Forbids `run_in_background: true` via a PreToolUse hook.** |
@@ -391,6 +391,8 @@ liquidity — the close path is idempotent under retry.
 | `logs/actions-YYYY-MM-DD.jsonl` | Audit JSONL | `logger.js logAction` |
 
 All persistent files are loaded/saved on each call — no in-memory caching layer. Keep writes small and on the path of one position close, never inside a hot loop.
+
+All of these paths resolve through `repoPath()` in `repo-root.js`. The `MERIDIAN_STATE_DIR` env var redirects every `repoPath()` consumer (data files, `logs/`, `user-config.json`) to an alternate directory; unset, behavior is exactly the repo root as before. The unit-test suite sets it to a temp dir (`unit-tests/_setup.mjs`) so tests can never touch live state. `REPO_ROOT` (git operations, startup log) is not affected by the override.
 
 ---
 

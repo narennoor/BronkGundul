@@ -13,28 +13,20 @@
 // scan. All numbers are real cycles from lessons.json; addresses are synthetic
 // so production entries are never touched.
 //
-// state.json / lessons.json / pool-memory.json / signal-weights.json /
-// user-config.json are backed up byte-for-byte and restored afterwards.
+// _setup.mjs isolates all state (state.json, lessons.json, pool-memory.json,
+// signal-weights.json, user-config.json, …) into a temp MERIDIAN_STATE_DIR —
+// the live files are never touched.
 
+import { statePath } from "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
 
-process.env.LOG_LEVEL = "error";
 // A throwaway keypair: bookkeepSyncAutoClosed only needs an address for the
 // datapi URL (the fetch itself is injected below). No funds, no chain.
 process.env.WALLET_PRIVATE_KEY ||= bs58.encode(Keypair.generate().secretKey);
-
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const FILES = ["state.json", "lessons.json", "pool-memory.json", "signal-weights.json", "user-config.json"];
-const backups = new Map(FILES.map((f) => {
-  const p = path.join(ROOT, f);
-  return [p, fs.existsSync(p) ? fs.readFileSync(p) : null];
-}));
 
 const { trackPosition, syncOpenPositions } = await import("../state.js");
 const { bookkeepSyncAutoClosed } = await import("../tools/dlmm.js");
@@ -46,31 +38,25 @@ const { config } = await import("../config.js");
 config.hiveMind.url = "";
 config.hiveMind.apiKey = "";
 
-test.after(() => {
-  for (const [p, content] of backups) {
-    if (content) fs.writeFileSync(p, content);
-    else if (fs.existsSync(p)) fs.rmSync(p);
-  }
-});
-
 // The 04:01 XST-SOL cycle, synthetic address.
 const POS_XST = "UNITTESTsyncclose11111111111111111111111111";
 const POOL_XST = "9aKBzv2QyD3GJdUAYp4w5XhAxRsuGQoq7rkUqoHmfNRd";
 
-const readLessons = () => JSON.parse(fs.readFileSync(path.join(ROOT, "lessons.json"), "utf8"));
+const readLessons = () => JSON.parse(fs.readFileSync(statePath("lessons.json"), "utf8"));
 
 function backdateDeploy(position, minutesAgo) {
-  const statePath = path.join(ROOT, "state.json");
-  const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  const stateFile = statePath("state.json");
+  const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
   state.positions[position].deployed_at = new Date(Date.now() - minutesAgo * 60_000).toISOString();
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
 }
 
-// Every open position that is NOT the synthetic one must stay in the "active"
-// list — this test runs against the live repo's state.json and must never
-// auto-close a real open position, even for the seconds before restore.
+// The isolated state dir starts empty, so any position that is not in the
+// on-chain "active" list is a candidate for auto-close. Keep the helper anyway:
+// it mirrors production (every open position the sync should NOT close is in
+// the list) and stays correct if a test ever pre-seeds extra positions.
 function otherOpenPositions() {
-  const state = JSON.parse(fs.readFileSync(path.join(ROOT, "state.json"), "utf8"));
+  const state = JSON.parse(fs.readFileSync(statePath("state.json"), "utf8"));
   return Object.keys(state.positions || {}).filter(
     (id) => !id.startsWith("UNITTEST") && !state.positions[id].closed,
   );
@@ -104,7 +90,7 @@ test("syncOpenPositions returns the auto-closed snapshot (and respects the grace
 });
 
 test("an auto-close the datapi has not indexed is booked with pending cash + a scheduled scan", async () => {
-  const state = JSON.parse(fs.readFileSync(path.join(ROOT, "state.json"), "utf8"));
+  const state = JSON.parse(fs.readFileSync(statePath("state.json"), "utf8"));
   const pos = { position: POS_XST, ...state.positions[POS_XST] };
 
   const recheckCalls = [];
@@ -127,7 +113,7 @@ test("an auto-close the datapi has not indexed is booked with pending cash + a s
 });
 
 test("a second pass over the same position does not double-book", async () => {
-  const state = JSON.parse(fs.readFileSync(path.join(ROOT, "state.json"), "utf8"));
+  const state = JSON.parse(fs.readFileSync(statePath("state.json"), "utf8"));
   const pos = { position: POS_XST, ...state.positions[POS_XST] };
 
   const before = readLessons().performance.filter((p) => p.position === POS_XST).length;
