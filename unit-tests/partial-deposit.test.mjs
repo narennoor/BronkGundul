@@ -8,6 +8,7 @@
 // the tick, the phantom +10.66% armed the trailing TP, and the position was
 // closed 31s after deploy for an actual PnL of -0.01%.
 
+import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
