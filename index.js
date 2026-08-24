@@ -903,13 +903,19 @@ Summarize the current portfolio health, total fees earned, and performance of al
       if (Date.now() - _screeningLastTriggered < oppCooldownMs) return;
       _opportunityPollBusy = true;
       try {
-        const [positions, balance] = await Promise.all([
-          getMyPositions({ force: true, silent: true }).catch(() => null),
-          getWalletBalances().catch(() => null),
-        ]);
+        const positions = await getMyPositions({ force: true, silent: true }).catch(() => null);
         if (!positions || countablePositions(positions) >= config.risk.maxPositions) return;
+        // Balance is read only AFTER the position gate, and never in DRY_RUN where
+        // it is not consulted. getWalletBalances hits the Helius Wallet API at 100
+        // credits per call with no cache; fetching it in parallel with the position
+        // read meant a wallet sitting at maxPositions burned one lookup per tick
+        // (~1.9k/day at 45s) and discarded it a line later. Cost: one extra
+        // round-trip (~300ms) on ticks that do proceed — irrelevant at this cadence.
         const minRequired = config.management.deployAmountSol + config.management.gasReserve;
-        if (process.env.DRY_RUN !== "true" && (!balance || balance.sol < minRequired)) return;
+        if (process.env.DRY_RUN !== "true") {
+          const balance = await getWalletBalances().catch(() => null);
+          if (!balance || balance.sol < minRequired) return;
+        }
 
         const top = await getTopCandidates({ limit: config.opportunity.limit }).catch(() => null);
         const candidates = (top?.candidates || []).slice().sort((a, b) => degenScore(b, config.opportunity) - degenScore(a, config.opportunity));
