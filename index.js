@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin, countablePositions } from "./tools/dlmm.js";
-import { getWalletBalances } from "./tools/wallet.js";
+import { getWalletBalances, getSolBalance } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
@@ -428,7 +428,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let liveMessage = null;
   let screenReport = null;
   try {
-    [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
+    // preBalance is a plain SOL number (RPC getBalance, ~1 credit) — the whole
+    // cycle only ever reads .sol off it, so the Wallet API's token list and USD
+    // values would be 100 credits of waste here.
+    [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getSolBalance()]);
     const preCount = countablePositions(prePositions);
     if (preCount >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${preCount}/${config.risk.maxPositions})`);
@@ -439,10 +442,13 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
     const minRequired = config.management.deployAmountSol + config.management.gasReserve;
     const isDryRun = process.env.DRY_RUN === "true";
-    if (!isDryRun && preBalance.sol < minRequired) {
-      log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
-      screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
-      appendScreeningSkipOnce(`Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`);
+    // null = the RPC read failed; treat it exactly like the old error path
+    // (getWalletBalances returned sol: 0 on failure) and skip the cycle.
+    if (!isDryRun && (preBalance == null || preBalance < minRequired)) {
+      const shown = preBalance == null ? "unknown" : preBalance.toFixed(3);
+      log("cron", `Screening skipped — insufficient SOL (${shown} < ${minRequired} needed for deploy + gas)`);
+      screenReport = `Screening skipped — insufficient SOL (${shown} < ${minRequired} needed for deploy + gas).`;
+      appendScreeningSkipOnce(`Insufficient SOL (${shown} < ${minRequired})`);
       _screeningBusy = false;
       return screenReport;
     }
@@ -459,10 +465,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
   timers.screeningLastRun = Date.now();
   log("cron", `Starting screening cycle [model: ${config.llm.screeningModel}]`);
   try {
-    // Reuse pre-fetched balance — no extra RPC call needed
-    const currentBalance = preBalance;
-    const deployAmount = computeDeployAmount(currentBalance.sol);
-    log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
+    // Reuse pre-fetched balance — no extra RPC call needed. DRY_RUN skips the
+    // gate above, so a null read can still reach here; 0 keeps the arithmetic safe.
+    const currentBalance = preBalance ?? 0;
+    const deployAmount = computeDeployAmount(currentBalance);
+    log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance} SOL)`);
 
     // Load active strategy
     const activeStrategy = getActiveStrategy();
@@ -656,7 +663,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
-Positions: ${countablePositions(prePositions)}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
+Positions: ${countablePositions(prePositions)}/${config.risk.maxPositions} | SOL: ${currentBalance.toFixed(3)} | Deploy: ${deployAmount} SOL
 
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
@@ -906,15 +913,16 @@ Summarize the current portfolio health, total fees earned, and performance of al
         const positions = await getMyPositions({ force: true, silent: true }).catch(() => null);
         if (!positions || countablePositions(positions) >= config.risk.maxPositions) return;
         // Balance is read only AFTER the position gate, and never in DRY_RUN where
-        // it is not consulted. getWalletBalances hits the Helius Wallet API at 100
-        // credits per call with no cache; fetching it in parallel with the position
-        // read meant a wallet sitting at maxPositions burned one lookup per tick
-        // (~1.9k/day at 45s) and discarded it a line later. Cost: one extra
-        // round-trip (~300ms) on ticks that do proceed — irrelevant at this cadence.
+        // it is not consulted: fetching it in parallel with the position read meant
+        // a wallet sitting at maxPositions burned one lookup per tick (~1.9k/day at
+        // 45s) and discarded it a line later. Cost: one extra round-trip (~300ms)
+        // on ticks that do proceed — irrelevant at this cadence. getSolBalance is
+        // an RPC getBalance (~1 credit) rather than the Wallet API (100 credits);
+        // only the SOL number is needed here.
         const minRequired = config.management.deployAmountSol + config.management.gasReserve;
         if (process.env.DRY_RUN !== "true") {
-          const balance = await getWalletBalances().catch(() => null);
-          if (!balance || balance.sol < minRequired) return;
+          const solBalance = await getSolBalance();
+          if (solBalance == null || solBalance < minRequired) return;
         }
 
         const top = await getTopCandidates({ limit: config.opportunity.limit }).catch(() => null);
@@ -1498,7 +1506,7 @@ async function deployLatestCandidate(index) {
       throw new Error(`NO DEPLOY: only cached candidate ${candidate.name} is not worth deploying — ${skipReason}`);
     }
   }
-  const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
+  const deployAmount = computeDeployAmount((await getSolBalance()) ?? 0);
   const binsBelow = computeBinsBelow(candidate.volatility);
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,

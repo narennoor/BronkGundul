@@ -29,7 +29,7 @@ import {
 } from "../state.js";
 import { recordPerformance, hasPerformanceRecord } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
-import { getWalletBalances, normalizeMint } from "./wallet.js";
+import { getWalletBalances, getSolBalance, normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { getAndClearStagedSignals, peekStagedSignals } from "../signal-tracker.js";
@@ -923,7 +923,7 @@ export async function deployPosition({
   // If no explicit SOL amount is provided, fall back to the configured dynamic deploy size.
   const fallbackAmountY =
     amount_y == null && amount_sol == null
-      ? computeDeployAmount((await getWalletBalances()).sol)
+      ? computeDeployAmount((await getSolBalance()) ?? 0)
       : 0;
   let finalAmountY = Number(amount_y ?? amount_sol ?? fallbackAmountY);
   const finalAmountX = Number(amount_x ?? 0);
@@ -956,7 +956,7 @@ export async function deployPosition({
     try {
       const staged = peekStagedSignals(pool_address, baseMint);
       if (staged?.smart_wallets_present === true) {
-        const walletSol = (await getWalletBalances()).sol;
+        const walletSol = (await getSolBalance()) ?? 0;
         const gasReserve = Number(config.management.gasReserve ?? 0.2);
         const spendable = Math.max(0, walletSol - gasReserve);
         const boosted = Math.min(
