@@ -123,6 +123,35 @@ export async function getWalletBalances() {
 }
 
 /**
+ * Native SOL balance only, read straight from the RPC (~1 credit) instead of
+ * the Helius Wallet API (100 credits per call, no cache). Use this wherever
+ * only the SOL number is needed — the deploy gates and deploy sizing. Anything
+ * that needs the token list or USD values must stay on getWalletBalances().
+ *
+ * Counts native lamports only: a stranded wSOL balance is invisible here. That
+ * is already true of the sweep (wSOL sits in its exclude set), so this adds no
+ * new blind spot, but it can read a shade lower than the Wallet API number the
+ * prompt and Telegram show.
+ *
+ * @returns {Promise<number|null>} SOL, or null when the wallet or RPC is unavailable.
+ */
+export async function getSolBalance() {
+  let publicKey;
+  try {
+    publicKey = getWallet().publicKey;
+  } catch {
+    return null;
+  }
+  try {
+    const lamports = await getConnection().getBalance(publicKey, "confirmed");
+    return lamports / LAMPORTS_PER_SOL;
+  } catch (error) {
+    log("wallet_error", `getBalance failed: ${error.message}`);
+    return null;
+  }
+}
+
+/**
  * Net native-SOL change for our wallet across a list of signatures.
  * `postBalance - preBalance` already nets out the fee the wallet paid, so the
  * result is real cash movement. A signature that is not yet queryable is

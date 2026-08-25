@@ -11,7 +11,7 @@ import {
   searchPools,
   waitForCloseBookkeeping,
 } from "./dlmm.js";
-import { getWalletBalances, swapToken, normalizeMint, reconcileCycleCash } from "./wallet.js";
+import { getWalletBalances, getSolBalance, swapToken, normalizeMint, reconcileCycleCash } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, attachExitExecution, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceEntry, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
 import { setPositionInstruction, getTrackedPosition } from "../state.js";
@@ -1099,13 +1099,16 @@ async function runSafetyChecks(name, args) {
 
       // Check SOL balance
       if (process.env.DRY_RUN !== "true") {
-        const balance = await getWalletBalances();
+        // SOL number only — an RPC getBalance (~1 credit) instead of the Wallet
+        // API (100). A failed read yields 0, which refuses the deploy exactly as
+        // the old error path did (getWalletBalances returned sol: 0 on failure).
+        const solBalance = (await getSolBalance()) ?? 0;
         const gasReserve = config.management.gasReserve;
         const minRequired = amountY + gasReserve;
-        if (balance.sol < minRequired) {
+        if (solBalance < minRequired) {
           return {
             pass: false,
-            reason: `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
+            reason: `Insufficient SOL: have ${solBalance} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
           };
         }
       }
