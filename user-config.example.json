@@ -122,6 +122,8 @@
   "pnlPollIntervalSec": 3,
   "pnlDepositCacheTtlSec": 300,
   "pnlTakeProfitConfirmSec": 15,
+  "pnlReportSinceIso": null,
+  "pnlReportLlmUsdBaseline": 0,
 
   "gmgnFeeSource": "gmgn",
   "gmgnApiKey": "",

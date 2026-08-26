@@ -9,6 +9,7 @@ import fs from "fs";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 import { repoPath } from "./repo-root.js";
+import { config } from "./config.js";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const OUTFLOW_TX_TYPES = new Set([
@@ -29,6 +30,27 @@ function readJson(file, fallback) {
 function walletChange(tx, wallet) {
   const entry = (tx.accountData || []).find((a) => a.account === wallet);
   return entry ? entry.nativeBalanceChange / 1e9 : 0;
+}
+
+/**
+ * Reporting cutoff (`pnlReportSinceIso`). The wallet usually predates the agent:
+ * manual swaps, test transfers and unrelated deposits sit in the same Helius
+ * history and drag gas, deposits and equity into a report that claims to
+ * describe the agent. With a cutoff set, everything before it collapses into a
+ * single opening-balance number and the report measures the agent only.
+ * null = whole history (previous behavior).
+ */
+export function resolveReportCutoff(iso = config.pnl?.reportSinceIso) {
+  if (!iso) return null;
+  // The shape check is NOT redundant with Date.parse: V8's fallback parser
+  // accepts almost anything and silently invents a date — `Date.parse("21 juli")`
+  // returns 2001-07-21, which would quietly cut off nothing at all. Demand a
+  // leading YYYY-MM-DD so a typo fails loudly instead.
+  const ms = /^\d{4}-\d{2}-\d{2}([T ]|$)/.test(String(iso).trim()) ? Date.parse(iso) : NaN;
+  if (!Number.isFinite(ms)) {
+    throw new Error(`pnlReportSinceIso tidak valid: "${iso}" — pakai ISO, mis. 2026-07-21T00:00:00Z`);
+  }
+  return { since: new Date(ms).toISOString(), ms, sec: Math.floor(ms / 1000) };
 }
 
 async function fetchAllTxs(wallet, heliusKey) {
@@ -82,6 +104,34 @@ async function fetchLlmUsage() {
 }
 
 /**
+ * Split the raw history at the cutoff. Everything before it collapses into ONE
+ * number — the wallet balance at that instant, derived from the pre-cutoff
+ * flows — and is otherwise invisible: its gas, deposits and withdrawals never
+ * enter the report.
+ *
+ * Closed cycles are dated by `recorded_at`. An entry without one cannot be
+ * placed on either side of the cutoff, so it is dropped and counted; keeping it
+ * would re-introduce exactly the pre-agent noise the cutoff exists to remove.
+ *
+ * `cutoff: null` is the identity transform (whole history, original behavior).
+ */
+export function applyCutoff({ txs, perf, wallet, cutoff }) {
+  if (!cutoff) {
+    return { inScopeTxs: txs, preCutoffTxs: [], openingBalance: 0, perf, perfUndated: 0 };
+  }
+  const inScopeTxs = txs.filter((t) => t.timestamp >= cutoff.sec);
+  const preCutoffTxs = txs.filter((t) => t.timestamp < cutoff.sec);
+  const dated = (p) => Date.parse(p?.recorded_at);
+  return {
+    inScopeTxs,
+    preCutoffTxs,
+    openingBalance: preCutoffTxs.reduce((s, t) => s + walletChange(t, wallet), 0),
+    perf: perf.filter((p) => Number.isFinite(dated(p)) && dated(p) >= cutoff.ms),
+    perfUndated: perf.filter((p) => !Number.isFinite(dated(p))).length,
+  };
+}
+
+/**
  * Compute the full report. Throws on missing env (HELIUS_API_KEY, RPC_URL,
  * WALLET_PRIVATE_KEY) or unreachable price API; LLM usage failure is non-fatal.
  */
@@ -90,6 +140,7 @@ export async function computePnlReport() {
   if (!process.env.HELIUS_API_KEY) throw new Error("HELIUS_API_KEY not set");
   if (!process.env.RPC_URL) throw new Error("RPC_URL not set");
 
+  const cutoff = resolveReportCutoff();
   const wallet = Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY)).publicKey.toString();
 
   // ── on-chain flows + local state, sampled as one atomic pass ──
@@ -100,17 +151,24 @@ export async function computePnlReport() {
   // On 3 Aug 2026 that inflated equity by 3.71 SOL and ROI by 15pp, with no
   // warning shown. Guard: read the JSON files right next to the balance, then
   // re-read the balance; if anything moved, redo the pass.
-  let txs, balance, flowSum, perf, statePositions, consistent = false;
+  //
+  // The FULL history is still paged even with a cutoff set: `consistent`
+  // (flowSum === balance) is what proves Helius returned everything, and that
+  // proof is exactly what makes the derived opening balance exact.
+  let txs, balance, flowSum, perfAll, statePositions, consistent = false;
   for (let attempt = 0; attempt < 3 && !consistent; attempt++) {
     txs = await fetchAllTxs(wallet, process.env.HELIUS_API_KEY);
     balance = await fetchBalance(wallet);
-    perf = readJson("lessons.json", {}).performance || [];
+    perfAll = readJson("lessons.json", {}).performance || [];
     statePositions = Object.values(readJson("state.json", {}).positions || {});
     const balanceAfterReads = await fetchBalance(wallet);
     flowSum = txs.reduce((s, t) => s + walletChange(t, wallet), 0);
     consistent = Math.abs(flowSum - balance) < 1e-6 && balance === balanceAfterReads;
   }
   const openPositions = statePositions.filter((p) => !p.closed);
+
+  const { inScopeTxs, preCutoffTxs, openingBalance, perf, perfUndated } =
+    applyCutoff({ txs, perf: perfAll, wallet, cutoff });
 
   // ── app bookkeeping ────────────────────────────────────────────
   // Two numeraires, both real and NOT interchangeable:
@@ -144,7 +202,7 @@ export async function computePnlReport() {
   const ilUsd = pnlUsd - feesUsd;
 
   let gasSol = 0, gasTxn = 0, depositIn = 0, withdrawOut = 0;
-  for (const t of txs) {
+  for (const t of inScopeTxs) {
     if (t.feePayer === wallet) { gasSol += t.fee / 1e9; gasTxn++; }
     // SOL arriving while the wallet sends tokens in the same tx is a swap fill
     // (Jupiter RFQ: the market maker is feePayer and pays out via system
@@ -157,6 +215,10 @@ export async function computePnlReport() {
     }
   }
   const depositNet = depositIn - withdrawOut;
+  // Capital the agent started from = wallet balance at the cutoff + net deposits
+  // since. Without a cutoff the opening balance is 0 and this is the old
+  // `depositNet`, unchanged.
+  const baseCapital = openingBalance + depositNet;
 
   // SOL locked in open positions = their deploy txs (principal + rent + gas).
   // Matched by the signatures recorded at deploy time. The old ±150s timestamp
@@ -164,6 +226,12 @@ export async function computePnlReport() {
   // closes in the 3 Aug 2026 reconciliation once deploys landed close together,
   // and a mismatch here silently mis-states equity. Positions deployed before
   // `deploy_txs` existed still use the window, and say so.
+  //
+  // Matched against the FULL tx list, not the in-scope slice: locked capital is
+  // locked whenever it was deployed. A position deployed BEFORE the cutoff is
+  // already accounted for inside `openingBalance` (its outflow reduced that
+  // balance), so counting it again here would double it — flagged and warned
+  // rather than silently absorbed.
   const openDetail = openPositions.map((p) => {
     const sigs = Array.isArray(p.deploy_txs) ? p.deploy_txs.filter(Boolean) : [];
     let mine = sigs.length ? txs.filter((t) => sigs.includes(t.signature)) : [];
@@ -182,6 +250,7 @@ export async function computePnlReport() {
     return {
       pool: p.pool_name, principal: p.amount_sol || 0, outflow, gasIn,
       deployed_at: p.deployed_at, matched_by: matchedBy,
+      pre_cutoff: Boolean(cutoff && Date.parse(p.deployed_at) < cutoff.ms),
     };
   });
   const lockedOut = openDetail.reduce((s, o) => s + o.outflow, 0);
@@ -190,7 +259,12 @@ export async function computePnlReport() {
   const lockedRent = lockedOut - lockedPrincipal - lockedGas;
 
   const solPrice = await fetchSolPrice();
-  const llmUsd = await fetchLlmUsage();
+  // OpenRouter reports usage for the LIFETIME of the key, which has no cutoff of
+  // its own. `pnlReportLlmUsdBaseline` is the reading taken at the cutoff; set it
+  // and the report charges only what the agent spent since.
+  const llmUsdLifetime = await fetchLlmUsage();
+  const llmBaseline = Number(config.pnl?.reportLlmUsdBaseline ?? 0) || 0;
+  const llmUsd = llmUsdLifetime == null ? null : Math.max(0, llmUsdLifetime - llmBaseline);
 
   // ── the bridge: bookkeeping → real cash ────────────────────────
   // SOL side is native (pnl_sol); USD side stays USD-native. The two do NOT
@@ -202,8 +276,8 @@ export async function computePnlReport() {
   // approximation remains lands on the IL row, never on the bottom line.
   const feesSol = feesSolNative + feesUsdNoSol / solPrice;
   const ilSol = netRevBookSol - feesSol;
-  // realized cash of all CLOSED cycles = balance + locked − deposits
-  const grossRealSol = balance + lockedOut - depositNet;          // after gas
+  // realized cash of all CLOSED cycles = balance + locked − capital put in
+  const grossRealSol = balance + lockedOut - baseCapital;        // after gas
   const netRevRealSol = grossRealSol + gasSol - lockedGas;        // before gas
   const execCostSol = netRevBookSol - netRevRealSol;
   const llmSol = llmUsd != null ? llmUsd / solPrice : 0;
@@ -214,6 +288,15 @@ export async function computePnlReport() {
     wallet,
     sol_price: solPrice,
     consistent,
+    cutoff: cutoff
+      ? {
+          since: cutoff.since,
+          opening_balance_sol: openingBalance,
+          pre_cutoff_txs: preCutoffTxs.length,
+          perf_undated_dropped: perfUndated,
+          perf_before_cutoff: perfAll.length - perf.length - perfUndated,
+        }
+      : null,
     perf: {
       closed: perf.length, wins, losses,
       win_rate_pct: perf.length ? Math.round((wins / perf.length) * 100) : 0,
@@ -230,22 +313,27 @@ export async function computePnlReport() {
       gas_sol: gasSol, gas_txn: gasTxn,
       gross_real_sol: grossRealSol,
       llm_usd: llmUsd, llm_sol: llmSol,
+      llm_usd_lifetime: llmUsdLifetime, llm_usd_baseline: llmBaseline,
       net_real_sol: netRealSol,
       net_book_usd: netRevBookUsd - gasSol * solPrice - (llmUsd || 0),
     },
     equity: {
+      opening_balance: openingBalance,
       deposit_in: depositIn, withdraw_out: withdrawOut, deposit_net: depositNet,
+      base_capital: baseCapital,
       balance, locked_principal: lockedPrincipal, locked_rent: lockedRent,
       total: balance + lockedOut,
-      drift_sol: balance + lockedOut - depositNet,
+      drift_sol: balance + lockedOut - baseCapital,
     },
     open: openDetail,
-    tx_count: txs.length,
+    tx_count: inScopeTxs.length,
+    tx_count_total: txs.length,
   };
 }
 
 const fmtUsd = (v, sign = true) => `${v < 0 ? "-" : sign ? "+" : ""}$${Math.abs(v).toFixed(2)}`;
 const fmtSol = (v, sign = true) => `${v < 0 ? "-" : sign ? "+" : ""}${Math.abs(v).toFixed(4)}`;
+const stampOf = (iso) => iso.slice(0, 16).replace("T", " ");
 
 /**
  * Render the report as aligned plain text (CLI) or Telegram HTML (<pre> block).
@@ -254,10 +342,13 @@ export function formatPnlReport(r, { html = false } = {}) {
   const sp = r.sol_price;
   const row = (label, usd, sol) =>
     `${label.padEnd(18)}${fmtUsd(usd).padStart(9)}${fmtSol(sol).padStart(10)}`;
+  const eqRow = (label, sol, note) =>
+    `${label.padEnd(18)}${fmtSol(sol, false).padStart(10)}${note ? `  ${note}` : ""}`;
   const b = r.bridge;
   const e = r.equity;
 
   const lines = [
+    r.cutoff ? `Periode: sejak ${stampOf(r.cutoff.since)} UTC (transaksi sebelumnya dikecualikan)` : null,
     `${r.perf.closed} closed | ${r.perf.wins}W/${r.perf.losses}L (${r.perf.win_rate_pct}%) | avg hold ${r.perf.avg_held_min}m | ${r.open.length} open`,
     "",
     "PEMBUKUAN (posisi closed)         USD       SOL",
@@ -278,19 +369,27 @@ export function formatPnlReport(r, { html = false } = {}) {
     b.llm_usd != null
       ? row("LLM (OpenRouter)", -b.llm_usd, -b.llm_sol)
       : "LLM (OpenRouter)      n/a",
+    b.llm_usd != null && b.llm_usd_baseline
+      ? `  LLM = ${fmtUsd(b.llm_usd_lifetime, false)} seumur key - baseline ${fmtUsd(b.llm_usd_baseline, false)} di cutoff.`
+      : null,
+    b.llm_usd != null && r.cutoff && !b.llm_usd_baseline
+      ? "  ⚠️ LLM masih total seumur key (belum di-cutoff) — set pnlReportLlmUsdBaseline."
+      : null,
     row("NET RIIL", b.net_real_sol * sp, b.net_real_sol),
     "",
     `Memo NET versi pembukuan: ${fmtUsd(b.net_book_usd)}`,
     "",
     "EKUITAS (SOL)",
-    `Deposit netto     ${fmtSol(e.deposit_net, false).padStart(10)}`,
-    `Saldo bebas       ${fmtSol(e.balance, false).padStart(10)}`,
-    `Modal ${String(r.open.length).padStart(2)} posisi   ${fmtSol(e.locked_principal, false).padStart(10)}  (+rent ${e.locked_rent.toFixed(4)})`,
-    `Ekuitas           ${fmtSol(e.total, false).padStart(10)}  (${fmtUsd(e.total * sp, false)})`,
-    `Untung/rugi       ${fmtSol(b.net_real_sol).padStart(10)}  (${fmtUsd(b.net_real_sol * sp)})`,
-    `  = ekuitas - deposit - biaya LLM`,
-    `ROI               ${(e.deposit_net > 0
-      ? `${b.net_real_sol >= 0 ? "+" : ""}${((b.net_real_sol / e.deposit_net) * 100).toFixed(2)}%`
+    r.cutoff ? eqRow("Saldo awal", e.opening_balance, `(${stampOf(r.cutoff.since)} UTC)`) : null,
+    eqRow("Deposit netto", e.deposit_net, r.cutoff ? "(sejak cutoff)" : ""),
+    r.cutoff ? eqRow("Modal dasar", e.base_capital, "(= saldo awal + deposit)") : null,
+    eqRow("Saldo bebas", e.balance),
+    eqRow(`Modal ${String(r.open.length).padStart(2)} posisi`, e.locked_principal, `(+rent ${e.locked_rent.toFixed(4)})`),
+    eqRow("Ekuitas", e.total, `(${fmtUsd(e.total * sp, false)})`),
+    `${"Untung/rugi".padEnd(18)}${fmtSol(b.net_real_sol).padStart(10)}  (${fmtUsd(b.net_real_sol * sp)})`,
+    `  = ekuitas - ${r.cutoff ? "modal dasar" : "deposit"} - biaya LLM`,
+    `${"ROI".padEnd(18)}${(e.base_capital > 0
+      ? `${b.net_real_sol >= 0 ? "+" : ""}${((b.net_real_sol / e.base_capital) * 100).toFixed(2)}%`
       : "n/a").padStart(10)}`,
   ];
   if (r.open.length) {
@@ -308,12 +407,23 @@ export function formatPnlReport(r, { html = false } = {}) {
   if (r.perf.missing_pnl_sol) {
     lines.push("", `⚠️ ${r.perf.missing_pnl_sol} entri tanpa pnl_sol — bagian itu masih dikonversi pakai harga SOL saat ini, jadi kolom SOL sedikit perkiraan.`);
   }
+  if (r.cutoff) {
+    const preCutoffOpen = r.open.filter((o) => o.pre_cutoff).length;
+    if (preCutoffOpen) {
+      lines.push("", `⚠️ ${preCutoffOpen} posisi terbuka di-deploy SEBELUM cutoff — modalnya sudah ikut di saldo awal, jadi terhitung dua kali. Tutup posisi itu atau geser cutoff ke sebelum deploy-nya.`);
+    }
+    if (!r.cutoff.pre_cutoff_txs) {
+      lines.push("", "⚠️ Tidak ada transaksi sebelum cutoff di riwayat Helius — saldo awal dianggap 0. Kalau wallet sudah berisi sebelum cutoff, angka ROI-nya kelewat bagus.");
+    }
+    if (r.cutoff.perf_undated_dropped) {
+      lines.push("", `⚠️ ${r.cutoff.perf_undated_dropped} entri performance tanpa recorded_at dibuang (tak bisa ditempatkan pada cutoff) — selisihnya jatuh ke baris biaya eksekusi.`);
+    }
+  }
   if (!r.consistent) {
     lines.push("", "⚠️ Snapshot tidak sinkron setelah 3 percobaan — ada tx/close yang mendarat saat laporan dihitung. Posisi yang tutup di sela bisa terhitung DUA KALI (modal terkunci + saldo). Jangan dipakai; ulangi saat agen sedang tenang.");
   }
 
-  const stamp = r.generated_at.slice(0, 16).replace("T", " ");
-  const title = `📒 PnL Meridian — ${stamp} UTC | SOL $${sp.toFixed(2)}`;
+  const title = `📒 PnL Meridian — ${stampOf(r.generated_at)} UTC | SOL $${sp.toFixed(2)}`;
   // Conditional rows are emitted as null; drop them so they don't become blanks.
   const body = lines.filter((l) => l != null).join("\n");
   if (html) {
