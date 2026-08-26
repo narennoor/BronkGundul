@@ -12,7 +12,8 @@ import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { resolveReportCutoff, applyCutoff, formatPnlReport } = await import("../pnl-report.js");
+const { resolveReportCutoff, applyCutoff, formatPnlReport, classifyCashFlows } =
+  await import("../pnl-report.js");
 
 const WALLET = "UNITTESTwa11et1111111111111111111111111111111";
 const CUTOFF = resolveReportCutoff("2026-07-21T00:00:00Z");
@@ -212,4 +213,85 @@ test("without a cutoff the report keeps the old equity layout", () => {
   assert.doesNotMatch(out, /Modal dasar/);
   assert.match(out, /Deposit netto\s+2\.0000/);
   assert.match(out, /= ekuitas - deposit - biaya LLM/);
+});
+
+// ── deposit / withdrawal classification ────────────────────────────
+// Helius types a Meteora add-liquidity tx that wraps SOL as
+// "TRANSFER/SYSTEM_PROGRAM" — indistinguishable from a real funding transfer
+// unless you look at its token legs. Trusting the label booked 87.24 SOL of
+// position deposits as withdrawals (26 Aug 2026).
+
+const POOL_VAULT = "E69Pyagtw8UXvve4xQDQoR2eTG7bSYod7H2Y8RjASyM8";
+const OUTSIDE = "FundingWa11et1111111111111111111111111111111";
+
+test("a DLMM deploy typed TRANSFER is NOT a withdrawal", () => {
+  // shape taken verbatim from tx 2zXrmdzY…: LBUZ program, wSOL + token legs out
+  const deploy = {
+    signature: "deploy1", timestamp: 1, type: "TRANSFER", feePayer: WALLET, fee: 5000,
+    tokenTransfers: [
+      { mint: "3BgwJ8b7", fromUserAccount: WALLET, toUserAccount: POOL_VAULT, tokenAmount: 374.5 },
+      { mint: "So111111", fromUserAccount: WALLET, toUserAccount: POOL_VAULT, tokenAmount: 0.575 },
+    ],
+    nativeTransfers: [{ fromUserAccount: WALLET, toUserAccount: POOL_VAULT, amount: 0.575e9 }],
+  };
+  const r = classifyCashFlows([deploy], WALLET);
+  assert.equal(r.withdrawOut, 0);
+  assert.equal(r.depositIn, 0);
+  // gas is still charged — the token check must not skip the fee
+  assert.equal(r.gasSol, 5000 / 1e9);
+  assert.equal(r.gasTxn, 1);
+});
+
+test("a pure SOL funding transfer in IS a deposit", () => {
+  // shape taken verbatim from tx 2Vd95gQ8…: system program only, no token legs
+  const funding = {
+    signature: "fund1", timestamp: 1, type: "TRANSFER", feePayer: OUTSIDE, fee: 5000,
+    tokenTransfers: [],
+    nativeTransfers: [{ fromUserAccount: OUTSIDE, toUserAccount: WALLET, amount: 5.4586e9 }],
+  };
+  const r = classifyCashFlows([funding], WALLET);
+  assert.equal(r.depositIn, 5.4586);
+  assert.equal(r.withdrawOut, 0);
+  assert.equal(r.gasTxn, 0);   // someone else paid
+});
+
+test("a pure SOL transfer out IS a withdrawal", () => {
+  const cashOut = {
+    signature: "out1", timestamp: 1, type: "TRANSFER", feePayer: WALLET, fee: 5000,
+    tokenTransfers: [],
+    nativeTransfers: [{ fromUserAccount: WALLET, toUserAccount: OUTSIDE, amount: 2e9 }],
+  };
+  assert.equal(classifyCashFlows([cashOut], WALLET).withdrawOut, 2);
+});
+
+test("an RFQ swap fill paying SOL in is NOT a deposit", () => {
+  const fill = {
+    signature: "fill1", timestamp: 1, type: "SWAP", feePayer: POOL_VAULT, fee: 5000,
+    tokenTransfers: [{ mint: "3BgwJ8b7", fromUserAccount: WALLET, toUserAccount: POOL_VAULT, tokenAmount: 100 }],
+    nativeTransfers: [{ fromUserAccount: POOL_VAULT, toUserAccount: WALLET, amount: 1.2e9 }],
+  };
+  assert.equal(classifyCashFlows([fill], WALLET).depositIn, 0);
+});
+
+test("dust below the 0.005 SOL floor is ignored on both sides", () => {
+  const dust = {
+    signature: "dust1", timestamp: 1, type: "TRANSFER", feePayer: WALLET, fee: 5000,
+    tokenTransfers: [],
+    nativeTransfers: [
+      { fromUserAccount: WALLET, toUserAccount: OUTSIDE, amount: 4e6 },
+      { fromUserAccount: OUTSIDE, toUserAccount: WALLET, amount: 4e6 },
+    ],
+  };
+  const r = classifyCashFlows([dust], WALLET);
+  assert.equal(r.withdrawOut, 0);
+  assert.equal(r.depositIn, 0);
+});
+
+test("position rent — a token-free SOL outflow — is not counted as a withdrawal", () => {
+  const rent = {
+    signature: "rent1", timestamp: 1, type: "INITIALIZE_POSITION", feePayer: WALLET, fee: 5000,
+    tokenTransfers: [],
+    nativeTransfers: [{ fromUserAccount: WALLET, toUserAccount: POOL_VAULT, amount: 0.109e9 }],
+  };
+  assert.equal(classifyCashFlows([rent], WALLET).withdrawOut, 0);
 });
