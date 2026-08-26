@@ -263,8 +263,10 @@ export async function computePnlReport() {
   // its own. `pnlReportLlmUsdBaseline` is the reading taken at the cutoff; set it
   // and the report charges only what the agent spent since.
   const llmUsdLifetime = await fetchLlmUsage();
-  const llmBaseline = Number(config.pnl?.reportLlmUsdBaseline ?? 0) || 0;
-  const llmUsd = llmUsdLifetime == null ? null : Math.max(0, llmUsdLifetime - llmBaseline);
+  const llmBaseline = Number.isFinite(config.pnl?.reportLlmUsdBaseline)
+    ? config.pnl.reportLlmUsdBaseline
+    : null;
+  const llmUsd = llmUsdLifetime == null ? null : Math.max(0, llmUsdLifetime - (llmBaseline ?? 0));
 
   // ── the bridge: bookkeeping → real cash ────────────────────────
   // SOL side is native (pnl_sol); USD side stays USD-native. The two do NOT
@@ -372,8 +374,8 @@ export function formatPnlReport(r, { html = false } = {}) {
     b.llm_usd != null && b.llm_usd_baseline
       ? `  LLM = ${fmtUsd(b.llm_usd_lifetime, false)} seumur key - baseline ${fmtUsd(b.llm_usd_baseline, false)} di cutoff.`
       : null,
-    b.llm_usd != null && r.cutoff && !b.llm_usd_baseline
-      ? "  ⚠️ LLM masih total seumur key (belum di-cutoff) — set pnlReportLlmUsdBaseline."
+    b.llm_usd != null && r.cutoff && b.llm_usd_baseline == null
+      ? "  ⚠️ LLM masih total seumur key (belum di-cutoff) — set pnlReportLlmUsdBaseline (0 kalau key-nya dibuat setelah cutoff)."
       : null,
     row("NET RIIL", b.net_real_sol * sp, b.net_real_sol),
     "",

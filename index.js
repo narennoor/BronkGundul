@@ -1726,7 +1726,13 @@ async function telegramHandler(msg) {
         reason: "Telegram slash command /setcfg",
       });
       if (!result?.success) {
-        await sendMessage(`Config update failed.\nUnknown: ${(result?.unknown || []).join(", ") || "none"}`).catch(() => {});
+        // `error` is the useful half — a value that failed coercion or validation
+        // reports it there, and `unknown` is empty. Printing only `unknown` turned
+        // every such failure into "Unknown: none", which says nothing at all.
+        const why = result?.error
+          ? result.error
+          : `key tidak dikenal: ${(result?.unknown || []).join(", ") || "none"}`;
+        await sendMessage(`Config update failed.\n${why}`).catch(() => {});
         return;
       }
       await sendMessage(`✅ Updated ${key} = ${JSON.stringify(value)}`).catch(() => {});
