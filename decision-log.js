@@ -1,6 +1,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { writeJsonAtomic } from "./utils/json-store.js";
 
 const DECISION_LOG_FILE = repoPath("decision-log.json");
 const MAX_DECISIONS = 100;
@@ -18,7 +19,7 @@ function load() {
 }
 
 function save(data) {
-  fs.writeFileSync(DECISION_LOG_FILE, JSON.stringify(data, null, 2));
+  writeJsonAtomic(DECISION_LOG_FILE, data);
 }
 
 function sanitize(value, maxLen = 280) {

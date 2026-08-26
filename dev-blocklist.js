@@ -9,6 +9,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { writeJsonAtomic } from "./utils/json-store.js";
 
 const BLOCKLIST_FILE = repoPath("dev-blocklist.json");
 
@@ -23,7 +24,7 @@ function load() {
 }
 
 function save(data) {
-  fs.writeFileSync(BLOCKLIST_FILE, JSON.stringify(data, null, 2));
+  writeJsonAtomic(BLOCKLIST_FILE, data);
 }
 
 export function isDevBlocked(devWallet) {

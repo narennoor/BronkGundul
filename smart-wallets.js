@@ -1,6 +1,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { writeJsonAtomic } from "./utils/json-store.js";
 
 const WALLETS_PATH = repoPath("smart-wallets.json");
 
@@ -14,7 +15,7 @@ function loadWallets() {
 }
 
 function saveWallets(data) {
-  fs.writeFileSync(WALLETS_PATH, JSON.stringify(data, null, 2));
+  writeJsonAtomic(WALLETS_PATH, data);
 }
 
 const SOLANA_PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;

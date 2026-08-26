@@ -10,6 +10,7 @@ import { log } from "./logger.js";
 import { config } from "./config.js";
 
 import { repoPath } from "./repo-root.js";
+import { writeJsonAtomic } from "./utils/json-store.js";
 
 const POOL_MEMORY_FILE = repoPath("pool-memory.json");
 const MAX_NOTE_LENGTH = 280;
@@ -35,7 +36,7 @@ function load() {
 }
 
 function save(data) {
-  fs.writeFileSync(POOL_MEMORY_FILE, JSON.stringify(data, null, 2));
+  writeJsonAtomic(POOL_MEMORY_FILE, data);
 }
 
 function isOorCloseReason(reason) {

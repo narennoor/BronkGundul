@@ -21,6 +21,7 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { config } from "./config.js";
 import { repoPath } from "./repo-root.js";
+import { writeJsonAtomic } from "./utils/json-store.js";
 
 const BOT_FILTER_FILE = process.env.BOT_FILTER_STORE || repoPath("bot-filter-memory.json");
 const STALE_ENTRY_MS = 7 * 24 * 60 * 60 * 1000; // drop records not struck for a week
@@ -35,7 +36,7 @@ function load() {
 }
 
 function save(data) {
-  fs.writeFileSync(BOT_FILTER_FILE, JSON.stringify(data, null, 2));
+  writeJsonAtomic(BOT_FILTER_FILE, data);
 }
 
 function sanitizeName(text) {

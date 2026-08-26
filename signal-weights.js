@@ -13,6 +13,7 @@ import fs from "fs";
 import { log } from "./logger.js";
 
 import { repoPath } from "./repo-root.js";
+import { writeJsonAtomic } from "./utils/json-store.js";
 
 const WEIGHTS_FILE = repoPath("signal-weights.json");
 
@@ -81,7 +82,7 @@ function loadWeights() {
 
 function saveWeights(data) {
   try {
-    fs.writeFileSync(WEIGHTS_FILE, JSON.stringify(data, null, 2));
+    writeJsonAtomic(WEIGHTS_FILE, data);
   } catch (err) {
     log("signal_weights_error", `Failed to write signal-weights.json: ${err.message}`);
   }
