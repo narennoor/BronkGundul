@@ -43,29 +43,35 @@ test("resolveReportCutoff: null passes through, garbage throws", () => {
   assert.equal(CUTOFF.sec, Date.parse("2026-07-21T00:00:00Z") / 1000);
 });
 
-test("pre-cutoff flows collapse into the opening balance and leave every other total", () => {
+test("the opening balance is derived from the CURRENT balance, not the pre-cutoff sum", () => {
+  // The walk stops at the cutoff, so pre-cutoff flows are only partially
+  // fetched and summing them would understate the opening balance.
   const txs = [
     tx("2026-07-25T00:00:00Z", -0.5),   // agent deploy
     tx("2026-07-22T00:00:00Z", +2),     // agent-era top-up
-    tx("2026-07-10T00:00:00Z", -1),     // pre-agent manual swap
-    tx("2026-07-01T00:00:00Z", +9),     // pre-agent funding
+    tx("2026-07-10T00:00:00Z", -1),     // one pre-cutoff page happened to load
   ];
-  const r = applyCutoff({ txs, perf: [], wallet: WALLET, cutoff: CUTOFF });
-
-  // 9 in, 1 out before 21 Jul → the wallet held 8 SOL when the agent took over
+  // wallet holds 9.5 now; 1.5 of that arrived after the cutoff → it held 8 before
+  const r = applyCutoff({ txs, perf: [], wallet: WALLET, cutoff: CUTOFF, balance: 9.5 });
   assert.equal(r.openingBalance, 8);
-  assert.equal(r.preCutoffTxs.length, 2);
+  assert.equal(r.preCutoffTxs.length, 1);
   assert.deepEqual(r.inScopeTxs.map((t) => t.timestamp), [
     Math.floor(Date.parse("2026-07-25T00:00:00Z") / 1000),
     Math.floor(Date.parse("2026-07-22T00:00:00Z") / 1000),
   ]);
 });
 
+test("a wallet with no history before the cutoff gets an opening balance of 0", () => {
+  const txs = [tx("2026-07-25T00:00:00Z", +3), tx("2026-07-22T00:00:00Z", +1)];
+  const r = applyCutoff({ txs, perf: [], wallet: WALLET, cutoff: CUTOFF, balance: 4 });
+  assert.equal(r.openingBalance, 0);
+});
+
 test("a tx exactly at the cutoff instant is IN scope", () => {
   const txs = [tx("2026-07-21T00:00:00Z", -0.3)];
-  const r = applyCutoff({ txs, perf: [], wallet: WALLET, cutoff: CUTOFF });
+  const r = applyCutoff({ txs, perf: [], wallet: WALLET, cutoff: CUTOFF, balance: 4.7 });
   assert.equal(r.inScopeTxs.length, 1);
-  assert.equal(r.openingBalance, 0);
+  assert.equal(r.openingBalance, 5);
 });
 
 test("closed cycles are filtered by recorded_at; undated ones are dropped AND counted", () => {
@@ -74,7 +80,7 @@ test("closed cycles are filtered by recorded_at; undated ones are dropped AND co
     { recorded_at: "2026-08-11T05:36:17.470Z", pnl_sol: 1 },
     { recorded_at: undefined, pnl_sol: 99 },
   ];
-  const r = applyCutoff({ txs: [], perf, wallet: WALLET, cutoff: CUTOFF });
+  const r = applyCutoff({ txs: [], perf, wallet: WALLET, cutoff: CUTOFF, balance: 0 });
   assert.equal(r.perf.length, 1);
   assert.equal(r.perf[0].pnl_sol, 1);
   assert.equal(r.perfUndated, 1);
@@ -83,7 +89,7 @@ test("closed cycles are filtered by recorded_at; undated ones are dropped AND co
 test("cutoff: null is the identity transform — pre-cutoff behavior is untouched", () => {
   const txs = [tx("2026-07-01T00:00:00Z", +9)];
   const perf = [{ recorded_at: undefined, pnl_sol: 3 }];
-  const r = applyCutoff({ txs, perf, wallet: WALLET, cutoff: null });
+  const r = applyCutoff({ txs, perf, wallet: WALLET, cutoff: null, balance: 9 });
   assert.equal(r.inScopeTxs, txs);
   assert.equal(r.perf, perf);
   assert.equal(r.openingBalance, 0);
@@ -122,6 +128,7 @@ function fakeReport(overrides = {}) {
       base_capital: 10, balance: 9.68, locked_principal: 0.5, locked_rent: 0,
       total: 10.18, drift_sol: 0.18,
     },
+    walk: { trusted: true, snapshot_stable: true, complete: false, reached_cutoff: true, txs_walked: 40 },
     open: [],
     tx_count: 40,
     tx_count_total: 500,
@@ -166,10 +173,29 @@ test("an open position deployed before the cutoff is flagged as double-counted",
   assert.match(formatPnlReport(r), /di-deploy SEBELUM cutoff/);
 });
 
-test("no pre-cutoff tx in the history warns that the opening balance is assumed 0", () => {
+test("a walk that never reached the cutoff names the paging limit, not a moving balance", () => {
   const r = fakeReport();
-  r.cutoff.pre_cutoff_txs = 0;
-  assert.match(formatPnlReport(r), /saldo awal dianggap 0/);
+  r.consistent = false;
+  r.walk = { trusted: false, snapshot_stable: true, complete: false, reached_cutoff: false, txs_walked: 10000 };
+  const out = formatPnlReport(r);
+  assert.match(out, /berhenti sebelum mencapai cutoff/);
+  assert.doesNotMatch(out, /Saldo berubah saat laporan dihitung/);
+});
+
+test("a balance that moved mid-report names the double count, not paging", () => {
+  const r = fakeReport();
+  r.consistent = false;
+  r.walk = { trusted: true, snapshot_stable: false, complete: false, reached_cutoff: true, txs_walked: 40 };
+  const out = formatPnlReport(r);
+  assert.match(out, /terhitung DUA KALI/);
+  assert.doesNotMatch(out, /berhenti sebelum mencapai cutoff/);
+});
+
+test("a full walk whose flows do not add up to the balance flags the gap", () => {
+  const r = fakeReport();
+  r.consistent = false;
+  r.walk = { trusted: false, snapshot_stable: true, complete: true, reached_cutoff: true, txs_walked: 500 };
+  assert.match(formatPnlReport(r), /ada tx yang hilang di tengah/);
 });
 
 test("dropped undated performance entries are surfaced, not swallowed", () => {

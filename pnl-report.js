@@ -53,23 +53,81 @@ export function resolveReportCutoff(iso = config.pnl?.reportSinceIso) {
   return { since: new Date(ms).toISOString(), ms, sec: Math.floor(ms / 1000) };
 }
 
-async function fetchAllTxs(wallet, heliusKey) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const PAGE_DELAY_MS = 250;
+const MAX_PAGE_DELAY_MS = 2000;
+
+/**
+ * One Helius page, with backoff. A bare 429 used to abort the whole report —
+ * the wallet is thousands of txs deep, so a single walk is 60+ requests and the
+ * consistency loop could triple that. Rate limits are expected here, not
+ * exceptional; honor Retry-After when the server sends one.
+ */
+async function fetchTxPage(url, { retries = 5 } = {}) {
+  let wait = 1000;
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url);
+    if (res.ok) return { batch: await res.json(), throttled: attempt > 0 };
+    if (res.status !== 429 && res.status < 500) {
+      throw new Error(`Helius ${res.status}: ${(await res.text()).slice(0, 120)}`);
+    }
+    if (attempt >= retries) {
+      throw new Error(
+        `Helius ${res.status} setelah ${retries} percobaan — rate limit belum reda, coba lagi beberapa menit lagi`,
+      );
+    }
+    const retryAfter = Number(res.headers.get("retry-after"));
+    await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : wait);
+    wait = Math.min(wait * 2, 15000);
+  }
+}
+
+/**
+ * Walk the wallet history newest-first.
+ *
+ * `stopBeforeSec` (the cutoff) ends the walk as soon as a page reaches past it:
+ * pre-cutoff txs contribute nothing but an opening balance, and that is derived
+ * from the current balance instead. Without it, every /pnl re-walked the entire
+ * chain history — unbounded in both Helius credits and wall clock.
+ *
+ * `known` short-circuits the consistency loop's later attempts: when the walk
+ * reaches a signature already held, the rest of the previous walk is still
+ * valid, so only the newly-landed txs are refetched.
+ *
+ * Returns `complete` (the walk ran off the end of history — the strong
+ * flowSum === balance check is available) and `reachedCutoff` (we paged back
+ * past the cutoff — the in-scope window is whole).
+ */
+async function fetchAllTxs(wallet, heliusKey, { stopBeforeSec = null, known = null } = {}) {
   const txs = [];
   let before;
+  let pageDelay = PAGE_DELAY_MS;
   for (let page = 0; page < 100; page++) {
     const url = new URL(`https://api.helius.xyz/v0/addresses/${wallet}/transactions`);
     url.searchParams.set("api-key", heliusKey);
     url.searchParams.set("limit", "100");
     if (before) url.searchParams.set("before", before);
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Helius ${res.status}: ${(await res.text()).slice(0, 120)}`);
-    const batch = await res.json();
-    if (!batch.length) break;
+    const { batch, throttled } = await fetchTxPage(url);
+    // A throttled page means we are pushing too hard; stay slower for the rest
+    // of the walk rather than earning another 429 on the very next request.
+    if (throttled) pageDelay = Math.min(pageDelay * 2, MAX_PAGE_DELAY_MS);
+    if (!batch.length) return { txs, complete: true, reachedCutoff: true, resumed: false };
+    if (known?.size) {
+      const hit = batch.findIndex((t) => known.has(t.signature));
+      if (hit >= 0) {
+        txs.push(...batch.slice(0, hit));
+        return { txs, complete: false, reachedCutoff: true, resumed: true };
+      }
+    }
     txs.push(...batch);
+    if (stopBeforeSec != null && batch.some((t) => t.timestamp < stopBeforeSec)) {
+      return { txs, complete: false, reachedCutoff: true, resumed: false };
+    }
     before = batch[batch.length - 1].signature;
-    await new Promise((r) => setTimeout(r, 250));
+    await sleep(pageDelay);
   }
-  return txs;
+  return { txs, complete: false, reachedCutoff: false, resumed: false };
 }
 
 async function fetchBalance(wallet) {
@@ -115,7 +173,7 @@ async function fetchLlmUsage() {
  *
  * `cutoff: null` is the identity transform (whole history, original behavior).
  */
-export function applyCutoff({ txs, perf, wallet, cutoff }) {
+export function applyCutoff({ txs, perf, wallet, cutoff, balance = 0 }) {
   if (!cutoff) {
     return { inScopeTxs: txs, preCutoffTxs: [], openingBalance: 0, perf, perfUndated: 0 };
   }
@@ -125,7 +183,11 @@ export function applyCutoff({ txs, perf, wallet, cutoff }) {
   return {
     inScopeTxs,
     preCutoffTxs,
-    openingBalance: preCutoffTxs.reduce((s, t) => s + walletChange(t, wallet), 0),
+    // Derived from the CURRENT balance, not from summing pre-cutoff flows: the
+    // walk stops at the cutoff, so those flows are only partially fetched. When
+    // the whole history happens to be walked the two agree by construction —
+    // that agreement is the flowSum === balance check.
+    openingBalance: balance - inScopeTxs.reduce((s, t) => s + walletChange(t, wallet), 0),
     perf: perf.filter((p) => Number.isFinite(dated(p)) && dated(p) >= cutoff.ms),
     perfUndated: perf.filter((p) => !Number.isFinite(dated(p))).length,
   };
@@ -152,23 +214,43 @@ export async function computePnlReport() {
   // warning shown. Guard: read the JSON files right next to the balance, then
   // re-read the balance; if anything moved, redo the pass.
   //
-  // The FULL history is still paged even with a cutoff set: `consistent`
-  // (flowSum === balance) is what proves Helius returned everything, and that
-  // proof is exactly what makes the derived opening balance exact.
-  let txs, balance, flowSum, perfAll, statePositions, consistent = false;
+  // With a cutoff set the walk STOPS there. The wallet is thousands of txs deep
+  // and this ran on every /pnl, which is what earned the Helius 429 (and burned
+  // credits the rest of the agent needs). Pre-cutoff txs contribute nothing but
+  // an opening balance, and that is derived from the current balance instead:
+  //   opening = balance − (flows since the cutoff)
+  // exact as long as the in-scope window is whole, which `reachedCutoff` proves.
+  // Walking the WHOLE history (no cutoff) still gets the stronger check —
+  // flowSum === balance, which catches a tx dropped anywhere.
+  let txs = [], balance, flowSum, perfAll, statePositions, walk;
+  let consistent = false, walkTrusted = false, snapshotStable = false;
   for (let attempt = 0; attempt < 3 && !consistent; attempt++) {
-    txs = await fetchAllTxs(wallet, process.env.HELIUS_API_KEY);
+    // Later attempts only refetch what landed since the last walk — re-walking
+    // the full history is what turned a busy wallet into a rate-limit spiral.
+    const known = attempt > 0 ? new Set(txs.map((t) => t.signature)) : null;
+    const fresh = await fetchAllTxs(wallet, process.env.HELIUS_API_KEY, {
+      stopBeforeSec: cutoff?.sec ?? null,
+      known,
+    });
+    txs = fresh.resumed
+      ? [...fresh.txs, ...txs]
+      : fresh.txs;
+    walk = fresh.resumed ? { ...fresh, complete: walk.complete, reachedCutoff: walk.reachedCutoff } : fresh;
     balance = await fetchBalance(wallet);
     perfAll = readJson("lessons.json", {}).performance || [];
     statePositions = Object.values(readJson("state.json", {}).positions || {});
     const balanceAfterReads = await fetchBalance(wallet);
     flowSum = txs.reduce((s, t) => s + walletChange(t, wallet), 0);
-    consistent = Math.abs(flowSum - balance) < 1e-6 && balance === balanceAfterReads;
+    walkTrusted = walk.complete
+      ? Math.abs(flowSum - balance) < 1e-6   // whole history: the strong check
+      : walk.reachedCutoff;                  // partial walk: in-scope window is whole
+    snapshotStable = balance === balanceAfterReads;
+    consistent = walkTrusted && snapshotStable;
   }
   const openPositions = statePositions.filter((p) => !p.closed);
 
   const { inScopeTxs, preCutoffTxs, openingBalance, perf, perfUndated } =
-    applyCutoff({ txs, perf: perfAll, wallet, cutoff });
+    applyCutoff({ txs, perf: perfAll, wallet, cutoff, balance });
 
   // ── app bookkeeping ────────────────────────────────────────────
   // Two numeraires, both real and NOT interchangeable:
@@ -290,6 +372,13 @@ export async function computePnlReport() {
     wallet,
     sol_price: solPrice,
     consistent,
+    walk: {
+      trusted: walkTrusted,
+      snapshot_stable: snapshotStable,
+      complete: walk.complete,
+      reached_cutoff: walk.reachedCutoff,
+      txs_walked: txs.length,
+    },
     cutoff: cutoff
       ? {
           since: cutoff.since,
@@ -414,15 +503,21 @@ export function formatPnlReport(r, { html = false } = {}) {
     if (preCutoffOpen) {
       lines.push("", `⚠️ ${preCutoffOpen} posisi terbuka di-deploy SEBELUM cutoff — modalnya sudah ikut di saldo awal, jadi terhitung dua kali. Tutup posisi itu atau geser cutoff ke sebelum deploy-nya.`);
     }
-    if (!r.cutoff.pre_cutoff_txs) {
-      lines.push("", "⚠️ Tidak ada transaksi sebelum cutoff di riwayat Helius — saldo awal dianggap 0. Kalau wallet sudah berisi sebelum cutoff, angka ROI-nya kelewat bagus.");
-    }
     if (r.cutoff.perf_undated_dropped) {
       lines.push("", `⚠️ ${r.cutoff.perf_undated_dropped} entri performance tanpa recorded_at dibuang (tak bisa ditempatkan pada cutoff) — selisihnya jatuh ke baris biaya eksekusi.`);
     }
   }
-  if (!r.consistent) {
-    lines.push("", "⚠️ Snapshot tidak sinkron setelah 3 percobaan — ada tx/close yang mendarat saat laporan dihitung. Posisi yang tutup di sela bisa terhitung DUA KALI (modal terkunci + saldo). Jangan dipakai; ulangi saat agen sedang tenang.");
+  // The two ways the snapshot can be untrustworthy are different problems with
+  // different fixes; one message for both used to send you looking in the wrong place.
+  if (r.walk && !r.walk.trusted) {
+    lines.push("", r.walk.reached_cutoff
+      ? "⚠️ Riwayat Helius tidak menutup seluruh saldo wallet — ada tx yang hilang di tengah. Angka kasnya bisa meleset."
+      : "⚠️ Penelusuran riwayat berhenti sebelum mencapai cutoff (batas 100 halaman) — saldo awal tidak bisa dihitung. Majukan pnlReportSinceIso ke era yang lebih baru.");
+  }
+  if (r.walk && !r.walk.snapshot_stable) {
+    lines.push("", "⚠️ Saldo berubah saat laporan dihitung setelah 3 percobaan — ada tx/close yang mendarat di sela. Posisi yang tutup di situ bisa terhitung DUA KALI (modal terkunci + saldo). Jangan dipakai; ulangi saat agen sedang tenang.");
+  } else if (!r.consistent && !r.walk) {
+    lines.push("", "⚠️ Snapshot tidak sinkron setelah 3 percobaan — jangan dipakai; ulangi saat agen sedang tenang.");
   }
 
   const title = `📒 PnL Meridian — ${stampOf(r.generated_at)} UTC | SOL $${sp.toFixed(2)}`;
