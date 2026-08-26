@@ -12,6 +12,12 @@ import { repoPath } from "./repo-root.js";
 import { config } from "./config.js";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
+// How far the summed flows may drift from the on-chain balance before the walk
+// is called untrustworthy. 1e-6 SOL was below dust: a real 5.5k-tx wallet lands
+// ~1e-4 SOL off from accounting rounding in the enhanced API and tripped the
+// "tx hilang di tengah" warning on every run. A genuinely dropped tx clears the
+// 0.005 SOL dust floor by orders of magnitude, so 0.001 still catches one.
+const FLOW_TOLERANCE_SOL = 1e-3;
 const OUTFLOW_TX_TYPES = new Set([
   "INITIALIZE_POSITION",
   "INITIALIZE_BIN_ARRAY",
@@ -162,6 +168,43 @@ async function fetchLlmUsage() {
 }
 
 /**
+ * Gas, plus the only two flows that change how much of the operator's own money
+ * is in play: SOL funded in from outside, and SOL taken back out.
+ *
+ * The decisive test is that the tx moves NO tokens. Helius's enhanced `type` is
+ * not trustworthy on its own — a Meteora add-liquidity tx (program `LBUZ…`) that
+ * wraps SOL through the system program is typed `TRANSFER/SYSTEM_PROGRAM`, and
+ * looks exactly like a plain transfer unless you check its token legs. Trusting
+ * the label booked 164 position deposits — 87.24 SOL — as money withdrawn from
+ * the wallet (26 Aug 2026: "Deposit netto -81.7779", which then flowed into
+ * every downstream row and showed +85.9 SOL of phantom profit).
+ *
+ * A genuine funding transfer carries no token legs at all: system program in,
+ * SOL out, nothing else. Anything with a token leg is the agent trading — a
+ * deploy, a claim, a swap fill — and is internal to the cycle, not capital
+ * entering or leaving.
+ */
+export function classifyCashFlows(txs, wallet) {
+  let gasSol = 0, gasTxn = 0, depositIn = 0, withdrawOut = 0;
+  for (const t of txs) {
+    if (t.feePayer === wallet) { gasSol += t.fee / 1e9; gasTxn++; }
+    const movesTokens = (t.tokenTransfers || []).length > 0;
+    if (movesTokens) continue;
+    for (const nt of t.nativeTransfers || []) {
+      if (nt.amount <= 5e6) continue;
+      if (nt.toUserAccount === wallet && t.feePayer !== wallet) depositIn += nt.amount / 1e9;
+      // The type check stays as a second gate on the way out: rent paid to open
+      // a position account is a token-free SOL outflow too, and it is NOT a
+      // withdrawal.
+      if (nt.fromUserAccount === wallet && t.feePayer === wallet && t.type === "TRANSFER") {
+        withdrawOut += nt.amount / 1e9;
+      }
+    }
+  }
+  return { gasSol, gasTxn, depositIn, withdrawOut };
+}
+
+/**
  * Split the raw history at the cutoff. Everything before it collapses into ONE
  * number — the wallet balance at that instant, derived from the pre-cutoff
  * flows — and is otherwise invisible: its gas, deposits and withdrawals never
@@ -242,7 +285,7 @@ export async function computePnlReport() {
     const balanceAfterReads = await fetchBalance(wallet);
     flowSum = txs.reduce((s, t) => s + walletChange(t, wallet), 0);
     walkTrusted = walk.complete
-      ? Math.abs(flowSum - balance) < 1e-6   // whole history: the strong check
+      ? Math.abs(flowSum - balance) < FLOW_TOLERANCE_SOL  // whole history: the strong check
       : walk.reachedCutoff;                  // partial walk: in-scope window is whole
     snapshotStable = balance === balanceAfterReads;
     consistent = walkTrusted && snapshotStable;
@@ -283,19 +326,7 @@ export async function computePnlReport() {
   }
   const ilUsd = pnlUsd - feesUsd;
 
-  let gasSol = 0, gasTxn = 0, depositIn = 0, withdrawOut = 0;
-  for (const t of inScopeTxs) {
-    if (t.feePayer === wallet) { gasSol += t.fee / 1e9; gasTxn++; }
-    // SOL arriving while the wallet sends tokens in the same tx is a swap fill
-    // (Jupiter RFQ: the market maker is feePayer and pays out via system
-    // transfer), not a deposit.
-    const isSwapFill = (t.tokenTransfers || []).some((tt) => tt.fromUserAccount === wallet);
-    for (const nt of t.nativeTransfers || []) {
-      if (nt.amount <= 5e6) continue;
-      if (nt.toUserAccount === wallet && t.feePayer !== wallet && !isSwapFill) depositIn += nt.amount / 1e9;
-      if (nt.fromUserAccount === wallet && t.feePayer === wallet && t.type === "TRANSFER") withdrawOut += nt.amount / 1e9;
-    }
-  }
+  const { gasSol, gasTxn, depositIn, withdrawOut } = classifyCashFlows(inScopeTxs, wallet);
   const depositNet = depositIn - withdrawOut;
   // Capital the agent started from = wallet balance at the cutoff + net deposits
   // since. Without a cutoff the opening balance is 0 and this is the old
