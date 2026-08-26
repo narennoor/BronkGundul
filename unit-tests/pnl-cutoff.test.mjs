@@ -143,10 +143,21 @@ test("LLM row nets the baseline off the lifetime key usage", () => {
   assert.match(out, /LLM = \$12\.00 seumur key - baseline \$8\.00 di cutoff/);
 });
 
-test("a cutoff with no LLM baseline says the LLM cost is still lifetime", () => {
+test("an UNSET LLM baseline says the LLM cost is still lifetime", () => {
+  const r = fakeReport();
+  r.bridge.llm_usd_baseline = null;
+  assert.match(formatPnlReport(r), /LLM masih total seumur key/);
+});
+
+test("an explicit 0 baseline is taken at face value — no nag", () => {
+  // The key was created after the cutoff, so there is genuinely nothing to
+  // subtract. Warning forever about a correctly-configured report is noise.
   const r = fakeReport();
   r.bridge.llm_usd_baseline = 0;
-  assert.match(formatPnlReport(r), /LLM masih total seumur key/);
+  r.bridge.llm_usd = r.bridge.llm_usd_lifetime;
+  const out = formatPnlReport(r);
+  assert.doesNotMatch(out, /LLM masih total seumur key/);
+  assert.doesNotMatch(out, /seumur key - baseline/);
 });
 
 test("an open position deployed before the cutoff is flagged as double-counted", () => {
