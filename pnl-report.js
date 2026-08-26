@@ -266,7 +266,7 @@ export async function computePnlReport() {
   // Walking the WHOLE history (no cutoff) still gets the stronger check —
   // flowSum === balance, which catches a tx dropped anywhere.
   let txs = [], balance, flowSum, perfAll, statePositions, walk;
-  let consistent = false, walkTrusted = false, snapshotStable = false;
+  let consistent = false, walkTrusted = false, snapshotStable = false, archivedCount = 0;
   for (let attempt = 0; attempt < 3 && !consistent; attempt++) {
     // Later attempts only refetch what landed since the last walk — re-walking
     // the full history is what turned a busy wallet into a rate-limit spiral.
@@ -280,7 +280,16 @@ export async function computePnlReport() {
       : fresh.txs;
     walk = fresh.resumed ? { ...fresh, complete: walk.complete, reachedCutoff: walk.reachedCutoff } : fresh;
     balance = await fetchBalance(wallet);
-    perfAll = readJson("lessons.json", {}).performance || [];
+    // `performance` is the LIVE era only — it is wiped on every era change, so a
+    // wallet that outlives an era has books that start later than its chain
+    // history, and the difference lands on the execution-cost row as phantom
+    // cost. `performance_archive` holds reconstructed closes from wiped eras
+    // (Meteora datapi, see scripts/backfill-era.mjs). Only this report reads it:
+    // feeding a dead regime's closes to evolveThresholds / recalculateWeights /
+    // the prompt summary would tune the live agent on a market that is gone.
+    const lessonsFile = readJson("lessons.json", {});
+    perfAll = [...(lessonsFile.performance || []), ...(lessonsFile.performance_archive || [])];
+    archivedCount = (lessonsFile.performance_archive || []).length;
     statePositions = Object.values(readJson("state.json", {}).positions || {});
     const balanceAfterReads = await fetchBalance(wallet);
     flowSum = txs.reduce((s, t) => s + walletChange(t, wallet), 0);
@@ -427,6 +436,8 @@ export async function computePnlReport() {
       fees_sol: feesSol, il_sol: ilSol, net_rev_sol: netRevBookSol,
       missing_pnl_sol: missingPnlSol,
       fees_sol_exact: feesSolExact,
+      archived: archivedCount,
+      archived_in_scope: perf.filter((p) => p.backfilled).length,
     },
     bridge: {
       net_rev_book_sol: netRevBookSol,
@@ -472,6 +483,9 @@ export function formatPnlReport(r, { html = false } = {}) {
   const lines = [
     r.cutoff ? `Periode: sejak ${stampOf(r.cutoff.since)} UTC (transaksi sebelumnya dikecualikan)` : null,
     `${r.perf.closed} closed | ${r.perf.wins}W/${r.perf.losses}L (${r.perf.win_rate_pct}%) | avg hold ${r.perf.avg_held_min}m | ${r.open.length} open`,
+    r.perf.archived_in_scope
+      ? `  termasuk ${r.perf.archived_in_scope} close arsip era lama (direkonstruksi dari Meteora datapi)`
+      : null,
     "",
     "PEMBUKUAN (posisi closed)         USD       SOL",
     row("Fee LP", r.perf.fees_usd, r.perf.fees_sol),
