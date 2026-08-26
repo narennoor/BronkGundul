@@ -295,3 +295,33 @@ test("position rent — a token-free SOL outflow — is not counted as a withdra
   };
   assert.equal(classifyCashFlows([rent], WALLET).withdrawOut, 0);
 });
+
+// ── era archive ────────────────────────────────────────────────────
+// `performance` is wiped on every era change, so a wallet that outlives an era
+// has books starting later than its chain history and the difference shows up
+// as phantom execution cost. Archived closes fill the hole for THIS report only.
+
+test("archived closes are cut off by recorded_at like any other close", () => {
+  const perf = [
+    { recorded_at: "2026-07-25T00:00:00Z", pnl_sol: -0.5, backfilled: true },
+    { recorded_at: "2026-07-19T00:00:00Z", pnl_sol: -9.9, backfilled: true },  // before cutoff
+    { recorded_at: "2026-08-11T00:00:00Z", pnl_sol: 1 },
+  ];
+  const r = applyCutoff({ txs: [], perf, wallet: WALLET, cutoff: CUTOFF, balance: 0 });
+  assert.equal(r.perf.length, 2);
+  assert.equal(r.perf.filter((p) => p.backfilled).length, 1);
+});
+
+test("the report says how many archived closes it counted", () => {
+  const r = fakeReport();
+  r.perf.archived = 487;
+  r.perf.archived_in_scope = 487;
+  assert.match(formatPnlReport(r), /termasuk 487 close arsip era lama/);
+});
+
+test("no archive → no mention of one", () => {
+  const r = fakeReport();
+  r.perf.archived = 0;
+  r.perf.archived_in_scope = 0;
+  assert.doesNotMatch(formatPnlReport(r), /arsip era lama/);
+});
