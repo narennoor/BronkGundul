@@ -24,6 +24,7 @@ import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsO
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
+import { resolveReportCutoff } from "../pnl-report.js";
 import fs from "fs";
 import { execSync } from "child_process";
 import { REPO_ROOT, repoPath } from "../repo-root.js";
@@ -265,6 +266,7 @@ function normalizeConfigValue(key, value) {
     "agentMeridianApiUrl",
     "pnlSource",
     "pnlRpcUrl",
+    "pnlReportSinceIso",
     "gmgnFeeSource",
     "gmgnApiKey",
     "gmgnTrendingInterval",
@@ -274,7 +276,14 @@ function normalizeConfigValue(key, value) {
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
   if (arrayKeys.has(key)) return coerceStringArray(value, key);
-  if (stringKeys.has(key)) return coerceString(value, key);
+  if (stringKeys.has(key)) {
+    const str = coerceString(value, key);
+    // Reject a bad cutoff HERE rather than at /pnl time — V8 happily reads
+    // "21 juli" as 2001-07-21, so a typo would silently cut off nothing and
+    // the report would look plausible.
+    if (key === "pnlReportSinceIso" && str) resolveReportCutoff(str);
+    return str;
+  }
   return coerceFiniteNumber(value, key);
 }
 
@@ -527,6 +536,8 @@ const toolMap = {
       // pnl fetcher / poller
       pnlSource: ["pnl", "source", ["pnlSource"]],
       pnlRpcUrl: ["pnl", "rpcUrl", ["pnlRpcUrl"]],
+      pnlReportSinceIso: ["pnl", "reportSinceIso", ["pnlReportSinceIso"]],
+      pnlReportLlmUsdBaseline: ["pnl", "reportLlmUsdBaseline", ["pnlReportLlmUsdBaseline"]],
       pnlPollIntervalSec: ["pnl", "pollIntervalSec", ["pnlPollIntervalSec"]],
       pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec", ["pnlDepositCacheTtlSec"]],
       // gmgn fee source + trending source

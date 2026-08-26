@@ -269,6 +269,17 @@ export const config = {
     // Defaults to the public pump.helius endpoint so the aggressive poller
     // never burns the main RPC_URL or the LPAgent sponsor budget.
     rpcUrl: nonEmptyString(u.pnlRpcUrl, process.env.PNL_RPC_URL, "https://pump.helius-rpc.com"),
+    // ── /pnl report scope ──
+    // The wallet is older than the agent: manual swaps, funding transfers and
+    // test txs before it went live pollute gas, deposits and ROI. Set this to
+    // the instant the agent took over and the report ignores everything before
+    // it, folding the pre-cutoff history into a single opening balance.
+    // null = whole wallet history (original behavior).
+    reportSinceIso: nonEmptyString(u.pnlReportSinceIso, process.env.PNL_REPORT_SINCE),
+    // OpenRouter only exposes LIFETIME usage for a key, so it has no cutoff of
+    // its own. Put the USD reading taken at `reportSinceIso` here and the report
+    // charges only what was spent after it.
+    reportLlmUsdBaseline: Number(u.pnlReportLlmUsdBaseline ?? 0),
     source: nonEmptyString(u.pnlSource, "rpc"), // rpc | meteora (fallback-only)
     pollIntervalSec: Number(u.pnlPollIntervalSec ?? 3),
     depositCacheTtlSec: Number(u.pnlDepositCacheTtlSec ?? 300),
