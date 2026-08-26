@@ -10,6 +10,7 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
 import { repoPath } from "./repo-root.js";
+import { writeJsonAtomic } from "./utils/json-store.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 
@@ -56,7 +57,7 @@ function load() {
 }
 
 function save(data) {
-  fs.writeFileSync(LESSONS_FILE, JSON.stringify(data, null, 2));
+  writeJsonAtomic(LESSONS_FILE, data);
 }
 
 function buildSignalSnapshot(perf) {
@@ -510,7 +511,7 @@ export function evolveThresholds(perfData, config) {
   userConfig._lastEvolved = new Date().toISOString();
   userConfig._positionsAtEvolution = perfData.length;
 
-  fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
+  writeJsonAtomic(USER_CONFIG_PATH, userConfig);
 
   // Apply to live config object immediately
   const s = config.screening;

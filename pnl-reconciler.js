@@ -16,6 +16,7 @@ import { repoPath } from "./repo-root.js";
 import { log } from "./logger.js";
 import { config } from "./config.js";
 import { evaluateCashMismatch } from "./tools/wallet.js";
+import { writeJsonAtomic } from "./utils/json-store.js";
 
 const SETTLE_GRACE_MINUTES = 10;  // closes younger than this are still the close path's job
 const GIVE_UP_HOURS = 72;         // flag entries the API never returned so we stop refetching
@@ -32,7 +33,7 @@ function readJson(file, fallback) {
 }
 
 function writeJson(file, data) {
-  fs.writeFileSync(repoPath(file), JSON.stringify(data, null, 2));
+  writeJsonAtomic(repoPath(file), data);
 }
 
 function num(value) {

@@ -11,6 +11,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { writeJsonAtomic, readJsonStore } from "./utils/json-store.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -34,21 +35,21 @@ function sanitizeStoredText(text, maxLen = MAX_INSTRUCTION_LENGTH) {
 }
 
 function load() {
-  if (!fs.existsSync(STATE_FILE)) {
-    return { positions: {}, recentEvents: [], lastUpdated: null };
-  }
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch (err) {
-    log("state_error", `Failed to read state.json: ${err.message}`);
-    return { positions: {}, lastUpdated: null };
-  }
+  // A missing file is a legitimate first run and yields the empty shape.
+  // A file that EXISTS but will not parse throws — it used to fall back to
+  // `{positions:{}}`, and the next save() wrote that back, converting one bad
+  // read into the permanent loss of every tracked position. Crashing loudly is
+  // strictly better than silently forgetting open positions holding real SOL.
+  return readJsonStore(STATE_FILE, { positions: {}, recentEvents: [], lastUpdated: null });
 }
 
 function save(state) {
   try {
     state.lastUpdated = new Date().toISOString();
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+    // Atomic: temp file + fsync + rename. state.json is ~2.8 MB and rewritten
+    // every ~3s by the PnL poller, so a plain writeFileSync left a wide window
+    // in which any other process read a half-written file.
+    writeJsonAtomic(STATE_FILE, state);
   } catch (err) {
     log("state_error", `Failed to write state.json: ${err.message}`);
   }

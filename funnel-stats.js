@@ -24,6 +24,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { writeJsonAtomic } from "./utils/json-store.js";
 
 const FUNNEL_STATS_FILE = repoPath("funnel-stats.json");
 
@@ -47,7 +48,7 @@ function load() {
 }
 
 function save(data) {
-  fs.writeFileSync(FUNNEL_STATS_FILE, JSON.stringify(data, null, 2));
+  writeJsonAtomic(FUNNEL_STATS_FILE, data);
 }
 
 /**
@@ -100,7 +101,7 @@ export function rotateFunnelStats(eraLabel) {
     if (fs.existsSync(FUNNEL_HISTORY_FILE)) history = JSON.parse(fs.readFileSync(FUNNEL_HISTORY_FILE, "utf8"));
   } catch { /* corrupt history never blocks a rotation — start a new one */ }
   history.push({ era: db.era ?? null, since: db.since, archived_at: new Date().toISOString(), client: db.client, shadow: db.shadow });
-  fs.writeFileSync(FUNNEL_HISTORY_FILE, JSON.stringify(history, null, 2));
+  writeJsonAtomic(FUNNEL_HISTORY_FILE, history);
   const fresh = { era: eraLabel, since: new Date().toISOString(), client: emptySection(), shadow: emptySection() };
   save(fresh);
   return fresh;
