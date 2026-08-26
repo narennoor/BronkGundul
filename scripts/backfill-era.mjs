@@ -68,7 +68,7 @@ if (!process.env.HELIUS_API_KEY) { console.error("HELIUS_API_KEY not set"); proc
 
 // ── 1. walk ────────────────────────────────────────────────────────
 const deltas = [], ixLists = [];
-let before, kept = 0, gas = 0, walletDelta = 0;
+let before, kept = 0, gas = 0, walletDelta = 0, depositIn = 0, withdrawOut = 0;
 for (let page = 0; page < 200; page++) {
   const u = new URL(`https://api.helius.xyz/v0/addresses/${wallet}/transactions`);
   u.searchParams.set("api-key", process.env.HELIUS_API_KEY);
@@ -80,6 +80,17 @@ for (let page = 0; page < 200; page++) {
     if (t.timestamp >= BEFORE) continue;
     kept++;
     if (t.feePayer === wallet) gas += t.fee / 1e9;
+    // Capital entering or leaving the wallet is NOT trading result and must come
+    // out of the residual. Same test as pnl-report.js classifyCashFlows: a
+    // genuine funding transfer moves no tokens (Helius types a Meteora
+    // add-liquidity that wraps SOL as "TRANSFER" too).
+    if (!(t.tokenTransfers || []).length) {
+      for (const nt of t.nativeTransfers || []) {
+        if (nt.amount <= 5e6) continue;
+        if (nt.toUserAccount === wallet && t.feePayer !== wallet) depositIn += nt.amount / 1e9;
+        if (nt.fromUserAccount === wallet && t.feePayer === wallet && t.type === "TRANSFER") withdrawOut += nt.amount / 1e9;
+      }
+    }
     for (const a of t.accountData || []) {
       if (!a.nativeBalanceChange) continue;
       if (a.account === wallet) walletDelta += a.nativeBalanceChange / 1e9;
@@ -160,11 +171,22 @@ const entries = rows
 const bookSol = entries.reduce((s, e) => s + e.pnl_sol, 0);
 const feeSol = entries.reduce((s, e) => s + e.fees_earned_sol, 0);
 console.log(`\nreconstructed: ${entries.length} closes  Σ pnl_sol ${bookSol.toFixed(4)} SOL  Σ fees ${feeSol.toFixed(4)} SOL`);
-console.log(`chain wallet delta over the era: ${walletDelta.toFixed(4)} SOL (gas ${gas.toFixed(4)})`);
-console.log(`unexplained (= execution cost): ${(bookSol - walletDelta - gas).toFixed(4)} SOL` +
-  (entries.length ? ` = ${((bookSol - walletDelta - gas) / entries.length).toFixed(5)} SOL/close` : ""));
-console.log("  NOTE: the wallet delta also carries deposits/withdrawals made during the era —");
-console.log("  subtract those by hand before reading the residual as pure execution cost.");
+const depositNet = depositIn - withdrawOut;
+const tradingDelta = walletDelta - depositNet;   // wallet movement that is NOT capital in/out
+console.log(`chain wallet delta over the era: ${walletDelta.toFixed(4)} SOL` +
+  `  (deposits ${depositNet >= 0 ? "+" : ""}${depositNet.toFixed(4)}, gas ${gas.toFixed(4)})`);
+console.log(`  → on-chain trading result     : ${tradingDelta.toFixed(4)} SOL`);
+const residual = bookSol - tradingDelta - gas;
+console.log(`unexplained (= execution cost) : ${residual.toFixed(4)} SOL` +
+  (entries.length ? ` = ${(residual / entries.length).toFixed(5)} SOL/close` : ""));
+console.log("  Sanity check: this should be a SMALL positive number. A large one means the");
+console.log("  reconstruction is missing closes; a negative one means it double-counted.");
+if (entries.length && Math.abs(residual / entries.length) > 0.02) {
+  console.log("  WARNING: residual per close is implausibly large — do NOT trust this backfill.");
+}
+// Positions still open at the era boundary would leave their capital out of the
+// wallet, which reads as a loss the books never see.
+console.log(`  (assumes no position was still open at the cutoff — verify if the residual is large)`);
 if (poolFail) console.log(`WARNING: ${poolFail} pool(s) failed to fetch — their closes are missing.`);
 const unmapped = candidates.size - posToPool.size;
 if (unmapped > 0) console.log(`WARNING: ${unmapped} position account(s) never appeared in a DLMM instruction — not reconstructed.`);
