@@ -251,6 +251,8 @@ function normalizeConfigValue(key, value) {
     "reportSnapshotEnabled",
     "reportWeeklyEnabled",
     "reportMonthlyEnabled",
+    "reportYearlyEnabled",
+    "reportYtdInMonthly",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads", "jupTrendingCategories", "dexScreenerCategories", "sweepExcludeMints"]);
   const stringKeys = new Set([
@@ -570,6 +572,8 @@ const toolMap = {
       reportSnapshotCronUtc: ["report", "snapshotCronUtc"],
       reportWeeklyEnabled: ["report", "weeklyEnabled"],
       reportMonthlyEnabled: ["report", "monthlyEnabled"],
+      reportYearlyEnabled: ["report", "yearlyEnabled"],
+      reportYtdInMonthly: ["report", "ytdInMonthly"],
       reportLedgerRole: ["report", "ledgerRole"],
       reportLedgerDir: ["report", "ledgerDir"],
       reportRegistryPath: ["report", "registryPath"],

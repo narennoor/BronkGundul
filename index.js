@@ -28,7 +28,7 @@ import {
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { takeSnapshot, healGap, loadSnapshots, ledgerWalletAddress } from "./equity-snapshot.js";
-import { ensurePeriodSealed, formatFinancialReport, lastClosedPeriodId, periodBounds } from "./financial-report.js";
+import { ensurePeriodSealed, formatFinancialReport, buildYtdReport, lastClosedPeriodId, periodBounds } from "./financial-report.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
@@ -219,7 +219,17 @@ async function runPeriodReport(kind, { onlyIfUnsealed = false } = {}) {
     }
     const { record, sealedNow } = ensurePeriodSealed(kind, id);
     if (onlyIfUnsealed && !sealedNow) return;
-    const msg = formatFinancialReport({ wallet: ledgerWalletAddress(), record }, { html: true });
+    // §06: every monthly report carries the running-YTD strip (ytdInMonthly) —
+    // costs zero Helius. Weekly never does (too frequent, YTD barely moves).
+    let ytd = null;
+    if (kind === "month" && config.report.ytdInMonthly) {
+      try {
+        ytd = buildYtdReport({ year: Number(id.slice(0, 4)) });
+      } catch (e) {
+        log("cron", `Strip YTD dilewati: ${e.message}`);
+      }
+    }
+    const msg = formatFinancialReport({ wallet: ledgerWalletAddress(), record, ytd }, { html: true });
     if (telegramEnabled()) await sendHTML(msg);
     log("cron", `Laporan ${kind} ${id} ${sealedNow ? "disegel & " : ""}terkirim — integrity_ok=${record.integrity.integrity_ok}`);
   } catch (error) {
@@ -237,8 +247,12 @@ async function runPeriodReport(kind, { onlyIfUnsealed = false } = {}) {
  */
 async function maybeRunMissedPeriodReports() {
   if (config.report.ledgerRole !== "primary") return;
+  // Order is load-bearing: month BEFORE year — the year seal reads the
+  // December seal (assertion 10). ensurePeriodSealed("year") additionally
+  // seals leftover months itself, so the order here is belt and braces.
   if (config.report.weeklyEnabled) await runPeriodReport("week", { onlyIfUnsealed: true });
   if (config.report.monthlyEnabled) await runPeriodReport("month", { onlyIfUnsealed: true });
+  if (config.report.yearlyEnabled) await runPeriodReport("year", { onlyIfUnsealed: true });
 }
 
 function stopCronJobs() {
@@ -921,6 +935,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   // period close never races its own raw material.
   let weeklyReportTask = null;
   let monthlyReportTask = null;
+  let yearlyReportTask = null;
   if (config.report.ledgerRole === "primary") {
     if (config.report.weeklyEnabled) {
       weeklyReportTask = cron.schedule(`20 0 * * 1`, async () => {
@@ -930,6 +945,15 @@ Summarize the current portfolio health, total fees earned, and performance of al
     if (config.report.monthlyEnabled) {
       monthlyReportTask = cron.schedule(`30 0 1 * *`, async () => {
         await runPeriodReport("month");
+      }, { timezone: 'UTC' });
+    }
+    // 1 Januari menyalakan tiga cron berurutan (00:20 minggu bila Senin →
+    // 00:30 bulan menyegel Desember → 00:35 tahun membaca seal Desember).
+    // Urutannya dijaga dua lapis: jam cron ini + ensurePeriodSealed("year")
+    // yang menyegel bulan tertinggal lebih dulu.
+    if (config.report.yearlyEnabled) {
+      yearlyReportTask = cron.schedule(`35 0 1 1 *`, async () => {
+        await runPeriodReport("year");
       }, { timezone: 'UTC' });
     }
   }
@@ -1092,6 +1116,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   if (snapshotTask) _cronTasks.push(snapshotTask, snapshotWatchdog);
   if (weeklyReportTask) _cronTasks.push(weeklyReportTask);
   if (monthlyReportTask) _cronTasks.push(monthlyReportTask);
+  if (yearlyReportTask) _cronTasks.push(yearlyReportTask);
   // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
   _cronTasks._opportunityPollInterval = opportunityPollInterval;
@@ -1577,7 +1602,7 @@ function formatHelpText() {
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
     "/pnl — full PnL report (bookkeeping vs on-chain, all costs)",
-    "/report week | month | <YYYY-Www> | <YYYY-MM> — laporan keuangan dari ledger (0 Helius)",
+    "/report week | month | year | ytd | <YYYY-Www> | <YYYY-MM> | <YYYY> — laporan keuangan dari ledger (0 Helius)",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
@@ -1732,16 +1757,28 @@ async function telegramHandler(msg) {
       } else if (/^\d{4}-\d{2}$/.test(arg)) {
         kind = "month";
         id = arg;
-      } else if (arg === "ytd" || arg === "year" || /^\d{4}$/.test(arg)) {
-        await sendMessage("Laporan tahunan/YTD menyusul di fase 3.").catch(() => {});
+      } else if (arg === "ytd") {
+        // YTD: never sealed, computed on demand — zero Helius, any time.
+        const rec = buildYtdReport({ year: new Date().getUTCFullYear() });
+        await sendHTML(formatFinancialReport({ wallet: ledgerWalletAddress(), record: rec }, { html: true }));
         return;
+      } else if (arg === "year") {
+        kind = "year";
+        id = lastClosedPeriodId("year");
+      } else if (/^\d{4}$/.test(arg)) {
+        kind = "year";
+        id = arg;
       } else {
-        await sendMessage("Pakai: /report week | month | <YYYY-Www> | <YYYY-MM>").catch(() => {});
+        await sendMessage("Pakai: /report week | month | year | ytd | <YYYY-Www> | <YYYY-MM> | <YYYY>").catch(() => {});
         return;
       }
       // ensurePeriodSealed seals a closed-but-unsealed period on demand;
       // an existing seal is returned as-is (immutable, never resealed here).
+      // For "year" it seals leftover months first (urutan 1 Januari).
       const report = ensurePeriodSealed(kind, id);
+      if (kind === "month" && config.report.ytdInMonthly) {
+        try { report.ytd = buildYtdReport({ year: Number(id.slice(0, 4)) }); } catch { /* strip optional */ }
+      }
       await sendHTML(formatFinancialReport(report, { html: true }));
     } catch (e) {
       await sendMessage(`Laporan gagal: ${e.message}`).catch(() => {});

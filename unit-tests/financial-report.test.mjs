@@ -137,7 +137,12 @@ test("ISO week & month bounds: Monday 00:00Z, half-open, W35 == Aug 24", () => {
   assert.equal(lastClosedPeriodId("week", NOW), "2026-W35");
   assert.equal(lastClosedPeriodId("month", NOW), "2026-08");
   assert.throws(() => periodBounds("week", "2026-08"), /tidak valid/);
-  assert.throws(() => periodBounds("year", "2026"), /belum didukung/);
+  // fase 3: kind "year" is supported
+  const y = periodBounds("year", "2026");
+  assert.equal(isoZ(y.from), "2026-01-01T00:00:00Z");
+  assert.equal(isoZ(y.to), "2027-01-01T00:00:00Z");
+  assert.equal(prevPeriodId("year", "2026"), "2025");
+  assert.throws(() => periodBounds("kuartal", "2026-Q1"), /tidak dikenal/);
 });
 
 // ── month seals: fold values + chain (test d, month lane) ────────────

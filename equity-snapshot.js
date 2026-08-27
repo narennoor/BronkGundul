@@ -634,14 +634,20 @@ export function periodBounds(kind, id) {
     }
     return { from: Date.UTC(Number(m[1]), Number(m[2]) - 1, 1), to: Date.UTC(Number(m[1]), Number(m[2]), 1) };
   }
-  throw new Error(`kind "${kind}" belum didukung — fase 2: week | month`);
+  if (kind === "year") {
+    const m = /^(\d{4})$/.exec(String(id));
+    if (!m) throw new Error(`id tahun tidak valid: "${id}" — format YYYY, mis. 2026`);
+    return { from: Date.UTC(Number(m[1]), 0, 1), to: Date.UTC(Number(m[1]) + 1, 0, 1) };
+  }
+  throw new Error(`kind "${kind}" tidak dikenal — week | month | year`);
 }
 
 /** Period id containing `ts`. */
 export function periodIdFor(kind, ts) {
   if (kind === "week") return isoWeekIdFor(ts);
   if (kind === "month") return new Date(dayBoundaryUtc(ts)).toISOString().slice(0, 7);
-  throw new Error(`kind "${kind}" belum didukung — fase 2: week | month`);
+  if (kind === "year") return new Date(dayBoundaryUtc(ts)).toISOString().slice(0, 4);
+  throw new Error(`kind "${kind}" tidak dikenal — week | month | year`);
 }
 
 /** Calendar-previous period id of the same kind. */
@@ -673,54 +679,18 @@ function savePeriods(address, store) {
 }
 
 /**
- * Fold one period record from the snapshot ledger. PURE — files already
- * loaded, no network, no filesystem. Exported for the unit suite and for the
- * fase-3 YTD fold, which reuses this on the running month.
- *
- * Assertion failures (§10 nos. 1–7) land in integrity.assertions_failed and
- * flip integrity.integrity_ok — they NEVER throw: a report with a label beats
- * a report that refuses to exist. What DOES throw is missing raw material:
- * sealing needs the exact opening and closing boundary snapshots, because a
- * seal is immutable and a substituted endpoint would bake a wrong number in
- * forever (the watchdog heals snapshots first, then seals).
- *
- * §07 shape plus four deliberate additions, all needed to keep sealed reports
- * self-contained once snapshots.json grows past them: pnl.closes, pnl.wins
- * (win_rate is recomputed, never summed), sol_price_close (the §09 CSV
- * column + USD derivation), integrity.integrity_ok.
+ * The shared window fold: everything both a sealed period and the YTD preview
+ * need from a snapshot range (from, to]. PURE — no network, no filesystem.
+ * `opening`/`closing` are the EXACT boundary snapshots or null; callers decide
+ * whether null is fatal (a seal: yes) or a labeled fallback (YTD preview).
  */
-export function computePeriodRecord({
-  kind,
-  id,
-  snapshots,
-  prevSeal = null,
-  prevSealExpected = false,
-  driftToleranceSol = 0.001,
-  sealedAtIso = null,
-}) {
-  const { from, to } = periodBounds(kind, id);
-  const assertions = [];
-  const note = (s) => assertions.push(s);
-  const eq = (x, y, tol = 1e-9) => Math.abs(x - y) <= tol;
-
-  const opening = snapshots.find((s) => Date.parse(s.boundary_ts) === from);
-  const closing = snapshots.find((s) => Date.parse(s.boundary_ts) === to);
-  if (!opening || !closing) {
-    throw new Error(
-      `Tidak bisa menyegel ${kind} ${id}: snapshot boundary ${!opening ? snapshotIdFor(from) : snapshotIdFor(to)} ` +
-      `belum ada di ledger — jalankan snapshot/heal dulu (seal immutable, endpoint pengganti akan membekukan angka yang salah)`,
-    );
-  }
-
-  // Window snapshots: boundary in (from, to] — snapshot id X covers [X−1d, X).
+export function foldWindows(snapshots, from, to) {
+  const opening = snapshots.find((s) => Date.parse(s.boundary_ts) === from) ?? null;
+  const closing = snapshots.find((s) => Date.parse(s.boundary_ts) === to) ?? null;
   const win = snapshots.filter((s) => {
     const b = Date.parse(s.boundary_ts);
     return b > from && b <= to;
   });
-  const expected = Math.round((to - from) / DAY_MS);
-  if (win.length !== expected) note(`windows:${win.length}/${expected} snapshot bolong`);
-
-  // ── additive fold ──
   let dep = 0, wd = 0, gas = 0, feeLp = 0, netRev = 0, liqGap = 0, closes = 0, wins = 0;
   const timedFlows = []; // { ts(sec), sol(signed) } — exact timing for Dietz
   for (const s of win) {
@@ -736,13 +706,129 @@ export function computePeriodRecord({
       timedFlows.push({ ts: t.ts, sol: t.dir === "in" ? t.amount_sol : -t.amount_sol });
     }
   }
+  return {
+    opening,
+    closing,
+    win,
+    sums: { dep, wd, gas, feeLp, netRev, liqGap, closes, wins },
+    timedFlows,
+    allTrusted: win.length > 0 && win.every((s) => s.integrity?.trusted === true),
+    cumDrift: round9(win.reduce((s, w) => s + (w.integrity?.drift_sol || 0), 0)),
+  };
+}
+
+/**
+ * TWR factor over one window range: chained daily sub-period returns, flows
+ * treated as start-of-day, daily LLM lifetime diffs joining the numerator
+ * where both endpoints of a day carry a same-key reading. Multiplicative and
+ * associative — chaining monthly factors equals chaining daily ones (§04).
+ */
+export function chainDailyTwr(opening, win) {
+  let factor = 1;
+  let prevSnap = opening;
+  for (const s of win) {
+    const flowNet = s.flows.deposit_in_sol - s.flows.withdraw_out_sol;
+    let llmDaySol = 0;
+    if (
+      Number.isFinite(prevSnap.llm_usd_lifetime) && Number.isFinite(s.llm_usd_lifetime) &&
+      prevSnap.llm_key_id && prevSnap.llm_key_id === s.llm_key_id && s.sol_price > 0
+    ) {
+      llmDaySol = Math.max(0, s.llm_usd_lifetime - prevSnap.llm_usd_lifetime) / s.sol_price;
+    }
+    const base = prevSnap.equity.total_sol + flowNet;
+    if (base > 1e-9) {
+      factor *= 1 + (s.equity.total_sol - prevSnap.equity.total_sol - flowNet - llmDaySol) / base;
+    }
+    prevSnap = s;
+  }
+  return factor;
+}
+
+/**
+ * LLM cost (USD, negative) between two endpoint snapshots: lifetime-reading
+ * diff, valid only on the same key. USD is the ONLY representation that
+ * telescopes across periods — month N's closing reading IS month N+1's
+ * opening — which is why assertion 10 compares LLM in USD, never in SOL
+ * (each month's llm_cost_sol is priced at its own closing price).
+ */
+export function llmEndpointDiffUsd(opening, closing) {
+  if (
+    Number.isFinite(opening?.llm_usd_lifetime) && Number.isFinite(closing?.llm_usd_lifetime) &&
+    opening.llm_key_id && opening.llm_key_id === closing.llm_key_id
+  ) {
+    return -Math.round(Math.max(0, closing.llm_usd_lifetime - opening.llm_usd_lifetime) * 100) / 100;
+  }
+  return null;
+}
+
+// The additive pnl rows of a seal (§04 fold table) — the exact set assertion
+// 10 sums across 12 monthly seals and compares to the yearly seal, and the
+// YTD sigma check compares between its two computation lanes. llm_cost is
+// deliberately NOT here (compared in USD, see llmEndpointDiffUsd); net_rill
+// is excluded because it is gross_rill + llm_cost — both already covered.
+export const ADDITIVE_PNL_ROWS = [
+  "fee_lp_sol", "impermanent_loss_sol", "net_revenue_sol", "exec_cost_sol",
+  "exec_cost_measured_sol", "gas_fee_sol", "gross_rill_sol", "closes", "wins",
+];
+export const ADDITIVE_EQUITY_ROWS = ["deposit_sol", "withdrawal_sol"];
+
+/**
+ * Fold one period record from the snapshot ledger. PURE — files already
+ * loaded, no network, no filesystem. Exported for the unit suite and reused
+ * (via foldWindows/chainDailyTwr) by the fase-3 YTD path.
+ *
+ * Assertion failures (§10) land in integrity.assertions_failed and flip
+ * integrity.integrity_ok — they NEVER throw: a report with a label beats a
+ * report that refuses to exist. What DOES throw is missing raw material:
+ * sealing needs the exact opening and closing boundary snapshots, because a
+ * seal is immutable and a substituted endpoint would bake a wrong number in
+ * forever (the watchdog heals snapshots first, then seals).
+ *
+ * For kind "year", pass the year's monthly seals as `monthlySeals`: assertion
+ * 10 sums their additive rows and compares against this record — two
+ * independent computation lanes (daily snapshots vs monthly seals) that must
+ * meet. There is deliberately NO weekly analogue: ISO weeks cross month and
+ * year boundaries, so their sums never reconcile by construction.
+ *
+ * §07 shape plus four deliberate additions, all needed to keep sealed reports
+ * self-contained once snapshots.json grows past them: pnl.closes, pnl.wins
+ * (win_rate is recomputed, never summed), sol_price_close (the §09 CSV
+ * column + USD derivation), integrity.integrity_ok.
+ */
+export function computePeriodRecord({
+  kind,
+  id,
+  snapshots,
+  prevSeal = null,
+  prevSealExpected = false,
+  monthlySeals = null,
+  driftToleranceSol = 0.001,
+  sealedAtIso = null,
+}) {
+  const { from, to } = periodBounds(kind, id);
+  const assertions = [];
+  const note = (s) => assertions.push(s);
+  const eq = (x, y, tol = 1e-9) => Math.abs(x - y) <= tol;
+
+  const fold = foldWindows(snapshots, from, to);
+  const { opening, closing, win } = fold;
+  if (!opening || !closing) {
+    throw new Error(
+      `Tidak bisa menyegel ${kind} ${id}: snapshot boundary ${!opening ? snapshotIdFor(from) : snapshotIdFor(to)} ` +
+      `belum ada di ledger — jalankan snapshot/heal dulu (seal immutable, endpoint pengganti akan membekukan angka yang salah)`,
+    );
+  }
+  const expected = Math.round((to - from) / DAY_MS);
+  if (win.length !== expected) note(`windows:${win.length}/${expected} snapshot bolong`);
+
   // Everything signed in the record: pendapatan positif, biaya negatif.
-  const depositSol = round9(dep);
-  const withdrawalSol = round9(-wd);
-  const gasFeeSol = round9(-gas);
-  const feeLpSol = round9(feeLp);
-  const netRevenueSol = round9(netRev);
+  const depositSol = round9(fold.sums.dep);
+  const withdrawalSol = round9(-fold.sums.wd);
+  const gasFeeSol = round9(-fold.sums.gas);
+  const feeLpSol = round9(fold.sums.feeLp);
+  const netRevenueSol = round9(fold.sums.netRev);
   const ilSol = round9(netRevenueSol - feeLpSol); // IL is the residual after fees — signed, may be positive
+  const { closes, wins } = fold.sums;
 
   // ── equity endpoints ──
   const saldoAwal = opening.equity.total_sol;
@@ -756,22 +842,12 @@ export function computePeriodRecord({
 
   // ── LLM: lifetime reading diff between the endpoints, same key only ──
   const solPriceClose = Number.isFinite(closing.sol_price) ? closing.sol_price : null;
-  let llmUsd = null;
-  let llmSol = null;
-  if (
-    Number.isFinite(opening.llm_usd_lifetime) && Number.isFinite(closing.llm_usd_lifetime) &&
-    opening.llm_key_id && opening.llm_key_id === closing.llm_key_id
-  ) {
-    llmUsd = -Math.round(Math.max(0, closing.llm_usd_lifetime - opening.llm_usd_lifetime) * 100) / 100;
-    llmSol = solPriceClose > 0 ? round9(llmUsd / solPriceClose) : null;
-  }
+  const llmUsd = llmEndpointDiffUsd(opening, closing);
+  const llmSol = llmUsd != null && solPriceClose > 0 ? round9(llmUsd / solPriceClose) : null;
   const netRill = round9(grossRill + (llmSol ?? 0));
 
   const mm = closing.market_memo || {};
   const unrealized = Number.isFinite(mm.nilai_pasar_sol) ? round9(mm.nilai_pasar_sol - modalPosisi) : null;
-
-  const allTrusted = win.length > 0 && win.every((s) => s.integrity?.trusted === true);
-  const cumDrift = round9(win.reduce((s, w) => s + (w.integrity?.drift_sol || 0), 0));
 
   // ── assertions 1–7 (§10). 1–6 are tautological when the code is right —
   // that is the point: they catch sign and rounding bugs. 7 is the sharp one. ──
@@ -789,49 +865,7 @@ export function computePeriodRecord({
     note(`7:seal ${prevPeriodId(kind, id)} tidak ada — rantai ${kind} putus`);
   }
 
-  // ── ROI ──
-  // Modified Dietz over TOTAL equity, flows weighted by their exact timestamps
-  // (flows.transfers[] — this is why per-transfer ts is recorded at snapshot
-  // time). Numerator is Net Rill: LLM is a real operating cost.
-  const spanMs = to - from;
-  let weighted = 0;
-  for (const f of timedFlows) {
-    const w = Math.min(1, Math.max(0, (to - f.ts * 1000) / spanMs));
-    weighted += w * f.sol;
-  }
-  const dietzBase = saldoAwal + weighted;
-  const dietzPct = dietzBase > 1e-9 ? Math.round((netRill / dietzBase) * 10000) / 100 : null;
-
-  // TWR: chained daily sub-period returns, flows treated as start-of-day.
-  // Daily LLM cost joins the numerator when both endpoints of the day carry a
-  // same-key lifetime reading (light snapshots do; derived days skip it).
-  let twr = 1;
-  let prevSnap = opening;
-  for (const s of win) {
-    const flowNet = s.flows.deposit_in_sol - s.flows.withdraw_out_sol;
-    let llmDaySol = 0;
-    if (
-      Number.isFinite(prevSnap.llm_usd_lifetime) && Number.isFinite(s.llm_usd_lifetime) &&
-      prevSnap.llm_key_id && prevSnap.llm_key_id === s.llm_key_id && s.sol_price > 0
-    ) {
-      llmDaySol = Math.max(0, s.llm_usd_lifetime - prevSnap.llm_usd_lifetime) / s.sol_price;
-    }
-    const base = prevSnap.equity.total_sol + flowNet;
-    if (base > 1e-9) {
-      twr *= 1 + (s.equity.total_sol - prevSnap.equity.total_sol - flowNet - llmDaySol) / base;
-    }
-    prevSnap = s;
-  }
-  const twrPct = Math.round((twr - 1) * 10000) / 100;
-
-  // Freeze what was folded: a later edit of any window snapshot no longer
-  // matches this hash, so "seal vs snapshot" disputes are decidable.
-  const snapshotsHash = crypto
-    .createHash("sha256")
-    .update(JSON.stringify([opening, ...win]))
-    .digest("hex");
-
-  return {
+  const record = {
     id,
     kind,
     prev_seal_id: prevSeal?.id ?? null,
@@ -842,7 +876,7 @@ export function computePeriodRecord({
       impermanent_loss_sol: ilSol,
       net_revenue_sol: netRevenueSol,
       exec_cost_sol: execCost,
-      exec_cost_measured_sol: round9(liqGap),
+      exec_cost_measured_sol: round9(fold.sums.liqGap),
       gas_fee_sol: gasFeeSol,
       gross_rill_sol: grossRill,
       llm_cost_sol: llmSol,
@@ -864,18 +898,64 @@ export function computePeriodRecord({
       unrealized_pnl_sol: unrealized,
       unrealized_suspect: !!mm.suspect,
     },
-    roi: { dietz_pct: dietzPct, twr_pct: twrPct },
+    roi: { dietz_pct: null, twr_pct: null },
     integrity: {
       windows: win.length,
-      all_trusted: allTrusted,
-      cum_drift_sol: cumDrift,
-      integrity_ok: assertions.length === 0,
+      all_trusted: fold.allTrusted,
+      cum_drift_sol: fold.cumDrift,
+      integrity_ok: true, // finalized below
       assertions_failed: assertions,
     },
     sol_price_close: solPriceClose,
     sealed_at: sealedAtIso,
-    snapshots_hash: snapshotsHash,
+    snapshots_hash: crypto
+      .createHash("sha256")
+      .update(JSON.stringify([opening, ...win]))
+      .digest("hex"),
   };
+
+  // ── assertion 10 (year only): Σ 12 monthly seals == this record, additive
+  // rows only. The two sides are computed on independent lanes on purpose. ──
+  if (kind === "year" && monthlySeals) {
+    const months = monthlySeals
+      .filter((m) => m.kind === "month" && m.id.startsWith(`${id}-`))
+      .sort((a, b) => (a.id < b.id ? -1 : 1));
+    if (months.length) {
+      const tol = Math.max(1e-6, driftToleranceSol);
+      for (const row of ADDITIVE_PNL_ROWS) {
+        const sum = round9(months.reduce((s, m) => s + (m.pnl[row] || 0), 0));
+        if (!eq(sum, record.pnl[row], tol)) note(`10:${row} Σbulanan ${sum} != tahunan ${record.pnl[row]}`);
+      }
+      for (const row of ADDITIVE_EQUITY_ROWS) {
+        const sum = round9(months.reduce((s, m) => s + (m.equity[row] || 0), 0));
+        if (!eq(sum, record.equity[row], tol)) note(`10:${row} Σbulanan ${sum} != tahunan ${record.equity[row]}`);
+      }
+      // LLM in USD (the telescoping representation) — 12 per-month cent
+      // roundings allow a few cents of slack.
+      if (llmUsd != null) {
+        const sumUsd = Math.round(months.reduce((s, m) => s + (m.pnl.llm_cost_usd || 0), 0) * 100) / 100;
+        if (!eq(sumUsd, llmUsd, 0.15)) note(`10:llm_cost_usd Σbulanan ${sumUsd} != tahunan ${llmUsd}`);
+      }
+    }
+    if (months.length < 12) note(`10:seal bulanan ${months.length}/12 — verifikasi silang parsial`);
+  }
+
+  // ── ROI ──
+  // Modified Dietz over TOTAL equity, flows weighted by their exact timestamps
+  // (flows.transfers[] — this is why per-transfer ts is recorded at snapshot
+  // time). Numerator is Net Rill: LLM is a real operating cost.
+  const spanMs = to - from;
+  let weighted = 0;
+  for (const f of fold.timedFlows) {
+    const w = Math.min(1, Math.max(0, (to - f.ts * 1000) / spanMs));
+    weighted += w * f.sol;
+  }
+  const dietzBase = saldoAwal + weighted;
+  record.roi.dietz_pct = dietzBase > 1e-9 ? Math.round((netRill / dietzBase) * 10000) / 100 : null;
+  record.roi.twr_pct = Math.round((chainDailyTwr(opening, win) - 1) * 10000) / 100;
+
+  record.integrity.integrity_ok = assertions.length === 0;
+  return record;
 }
 
 /**
@@ -912,6 +992,10 @@ export function sealPeriod(kind, id, { reseal = false, now = Date.now() } = {}) 
     snapshots,
     prevSeal,
     prevSealExpected,
+    // assertion 10: the year seal verifies itself against the 12 monthly
+    // seals — the reason the 1 Jan cron order (00:30 month → 00:35 year) and
+    // the watchdog's month-before-year sealing exist.
+    monthlySeals: kind === "year" ? store.periods : null,
     driftToleranceSol: Number(config.report.driftToleranceSol ?? 0.001),
     sealedAtIso: new Date(now).toISOString(),
   });

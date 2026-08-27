@@ -396,6 +396,10 @@ export const config = {
     // (bulanan) UTC — hanya jalan pada role primary.
     weeklyEnabled: u.reportWeeklyEnabled ?? true,
     monthlyEnabled: u.reportMonthlyEnabled ?? true,
+    // Fase 3: seal tahunan (cron 00:35 tgl 1 Jan, primary) + strip YTD
+    // berjalan di setiap laporan bulanan (ongkosnya nol Helius).
+    yearlyEnabled: u.reportYearlyEnabled ?? true,
+    ytdInMonthly: u.reportYtdInMonthly ?? true,
     // The ledger lives OUTSIDE repoPath() on purpose: every daemon writes its
     // own wallet's ledger where one consolidator can read them all, and a
     // worktree checkout can disappear. MERIDIAN_LEDGER_DIR (env) overrides for
