@@ -19,6 +19,7 @@ import {
   sendMarkdown,
   sendMessageWithButtons,
   sendHTML,
+  sendDocument,
   editMessage,
   editMessageWithButtons,
   answerCallbackQuery,
@@ -29,6 +30,7 @@ import {
 import { generateBriefing } from "./briefing.js";
 import { takeSnapshot, healGap, loadSnapshots, ledgerWalletAddress } from "./equity-snapshot.js";
 import { ensurePeriodSealed, formatFinancialReport, buildYtdReport, lastClosedPeriodId, periodBounds } from "./financial-report.js";
+import { buildReportCsvs } from "./financial-csv.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
@@ -199,6 +201,24 @@ async function maybeRunMissedSnapshot() {
 }
 
 /**
+ * Fase 4 (§09): the CSV attachments that follow a report's text summary —
+ * meridian_periods.csv (continuous, all kinds) + closes/curve per report kind.
+ * Runs AFTER the text went out and swallows its own failures: an attachment
+ * problem must never take down a report that already exists, and the next
+ * report rebuilds all three files from the ledger anyway.
+ */
+async function sendReportCsvs(record) {
+  if (!config.report.csvEnabled || !telegramEnabled()) return;
+  try {
+    for (const f of buildReportCsvs(record, { wallet: ledgerWalletAddress() })) {
+      await sendDocument(f.buffer, f.filename, f.caption);
+    }
+  } catch (e) {
+    log("cron_error", `CSV laporan ${record.kind} ${record.id} gagal: ${e.message}`);
+  }
+}
+
+/**
  * Seal the just-closed period and send its report (fase 2: week + month).
  * Sealing is pure arithmetic over the ledger files — zero Helius. With
  * `onlyIfUnsealed` (watchdog path) an already-sealed period sends nothing, so
@@ -231,6 +251,7 @@ async function runPeriodReport(kind, { onlyIfUnsealed = false } = {}) {
     }
     const msg = formatFinancialReport({ wallet: ledgerWalletAddress(), record, ytd }, { html: true });
     if (telegramEnabled()) await sendHTML(msg);
+    await sendReportCsvs(record);
     log("cron", `Laporan ${kind} ${id} ${sealedNow ? "disegel & " : ""}terkirim — integrity_ok=${record.integrity.integrity_ok}`);
   } catch (error) {
     log("cron_error", `Laporan ${kind} gagal: ${error.message}`);
@@ -1761,6 +1782,7 @@ async function telegramHandler(msg) {
         // YTD: never sealed, computed on demand — zero Helius, any time.
         const rec = buildYtdReport({ year: new Date().getUTCFullYear() });
         await sendHTML(formatFinancialReport({ wallet: ledgerWalletAddress(), record: rec }, { html: true }));
+        await sendReportCsvs(rec); // YTD: periods + curve mingguan — tanpa closes (§09)
         return;
       } else if (arg === "year") {
         kind = "year";
@@ -1780,6 +1802,7 @@ async function telegramHandler(msg) {
         try { report.ytd = buildYtdReport({ year: Number(id.slice(0, 4)) }); } catch { /* strip optional */ }
       }
       await sendHTML(formatFinancialReport(report, { html: true }));
+      await sendReportCsvs(report.record);
     } catch (e) {
       await sendMessage(`Laporan gagal: ${e.message}`).catch(() => {});
     }

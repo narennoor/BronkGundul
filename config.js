@@ -400,6 +400,16 @@ export const config = {
     // berjalan di setiap laporan bulanan (ongkosnya nol Helius).
     yearlyEnabled: u.reportYearlyEnabled ?? true,
     ytdInMonthly: u.reportYtdInMonthly ?? true,
+    // Fase 4: lampiran CSV §09 menyusul setiap laporan sebagai dokumen
+    // Telegram (meridian_periods.csv + closes + curve sesuai jenis laporan).
+    csvEnabled: u.reportCsvEnabled ?? true,
+    // Granularitas titik kurva per jenis laporan (day | week). Mingguan tidak
+    // pernah punya kurva — tujuh titik tidak membentuk kurva (§09).
+    curveGranularity: {
+      month: nonEmptyString(u.reportCurveGranularityMonth, "day"),
+      year: nonEmptyString(u.reportCurveGranularityYear, "week"),
+      ytd: nonEmptyString(u.reportCurveGranularityYtd, "week"),
+    },
     // The ledger lives OUTSIDE repoPath() on purpose: every daemon writes its
     // own wallet's ledger where one consolidator can read them all, and a
     // worktree checkout can disappear. MERIDIAN_LEDGER_DIR (env) overrides for

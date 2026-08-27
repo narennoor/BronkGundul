@@ -236,6 +236,34 @@ export async function sendHTML(html) {
   return postTelegram("sendMessage", { text: plain });
 }
 
+/**
+ * Send a file as a Telegram document (multipart/form-data) — the §09 CSV
+ * attachments. Uses Node 22's global FormData/Blob (no dependency); fetch
+ * writes the multipart boundary itself, so no Content-Type header here.
+ * Caption max 1024 chars (Telegram limit), document max 50 MB — the CSVs are
+ * tens of KB. Returns the API result or null; a failed document must never
+ * take the text report down with it, so this never throws.
+ */
+export async function sendDocument(buffer, filename, caption = "") {
+  if (!TOKEN || !chatId) return null;
+  try {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    if (caption) form.append("caption", String(caption).slice(0, 1024));
+    form.append("document", new Blob([buffer], { type: "text/csv" }), String(filename));
+    const res = await tgFetch(`${BASE}/sendDocument`, { method: "POST", body: form });
+    if (!res.ok) {
+      const err = await res.text();
+      log("telegram_error", `sendDocument ${res.status}: ${err.slice(0, 200)}`);
+      return null;
+    }
+    return await res.json();
+  } catch (e) {
+    log("telegram_error", `sendDocument failed: ${e.message}`);
+    return null;
+  }
+}
+
 export async function editMessage(text, messageId) {
   if (!TOKEN || !chatId || !messageId) return null;
   return postTelegram("editMessageText", {

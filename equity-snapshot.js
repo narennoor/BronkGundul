@@ -136,10 +136,12 @@ function readStatePositions() {
   return Object.values(state.positions || {});
 }
 
-function readPerformanceEntries() {
+export function readPerformanceEntries() {
   // performance = the live era; performance_archive = reconstructed closes of
   // wiped eras (scripts/backfill-era.mjs). Both are dated by recorded_at, so a
-  // daily window can rollup across the union safely.
+  // daily window can rollup across the union safely. Exported for
+  // financial-csv.js (closes CSV) — same source, same recorded_at dating, so
+  // its rows always reconcile with the seals' pnl.closes.
   const lessons = readJsonStore(repoPath("lessons.json"), {});
   return [...(lessons.performance || []), ...(lessons.performance_archive || [])];
 }

@@ -253,6 +253,7 @@ function normalizeConfigValue(key, value) {
     "reportMonthlyEnabled",
     "reportYearlyEnabled",
     "reportYtdInMonthly",
+    "reportCsvEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads", "jupTrendingCategories", "dexScreenerCategories", "sweepExcludeMints"]);
   const stringKeys = new Set([
@@ -283,6 +284,9 @@ function normalizeConfigValue(key, value) {
     "reportLedgerDir",
     "reportRegistryPath",
     "reportPositionValuation",
+    "reportCurveGranularityMonth",
+    "reportCurveGranularityYear",
+    "reportCurveGranularityYtd",
   ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
@@ -293,6 +297,9 @@ function normalizeConfigValue(key, value) {
     // "21 juli" as 2001-07-21, so a typo would silently cut off nothing and
     // the report would look plausible.
     if (key === "pnlReportSinceIso" && str) resolveReportCutoff(str);
+    if (key.startsWith("reportCurveGranularity") && str !== "day" && str !== "week") {
+      throw new Error(`${key} must be "day" or "week"`);
+    }
     return str;
   }
   return coerceFiniteNumber(value, key);
@@ -580,6 +587,12 @@ const toolMap = {
       reportWalkOverlapMin: ["report", "walkOverlapMin"],
       reportDriftToleranceSol: ["report", "driftToleranceSol"],
       reportPositionValuation: ["report", "positionValuation"],
+      reportCsvEnabled: ["report", "csvEnabled"],
+      // field is a PATH here (config.report.curveGranularity.<kind>) — the
+      // apply loop below walks array fields; persistence stays a flat key.
+      reportCurveGranularityMonth: ["report", ["curveGranularity", "month"]],
+      reportCurveGranularityYear: ["report", ["curveGranularity", "year"]],
+      reportCurveGranularityYtd: ["report", ["curveGranularity", "ytd"]],
     };
 
     const applied = {};
@@ -644,9 +657,13 @@ const toolMap = {
     for (const [key, val] of Object.entries(applied)) {
       if (key.startsWith("_")) continue;
       const [section, field] = CONFIG_MAP[key];
-      const before = config[section][field];
-      config[section][field] = val;
-      log("config", `update_config: config.${section}.${field} ${before} → ${val} (verify: ${config[section][field]})`);
+      const fieldPath = Array.isArray(field) ? field : [field];
+      let target = config[section];
+      for (const part of fieldPath.slice(0, -1)) target = target[part];
+      const leaf = fieldPath[fieldPath.length - 1];
+      const before = target[leaf];
+      target[leaf] = val;
+      log("config", `update_config: config.${section}.${fieldPath.join(".")} ${before} → ${val} (verify: ${target[leaf]})`);
     }
     if (
       applied.binsBelow != null ||
