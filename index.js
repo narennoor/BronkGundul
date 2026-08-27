@@ -27,6 +27,7 @@ import {
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
+import { takeSnapshot, healGap } from "./equity-snapshot.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
@@ -95,6 +96,7 @@ let _cronTasks = [];
 let _managementBusy = false; // prevents overlapping management cycles
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _reconcileBusy = false;  // prevents overlapping PnL reconcile runs
+let _snapshotBusy = false;   // prevents overlapping equity-ledger snapshot/heal runs
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 // Exit/peak confirmation is now done by consecutive-tick counting in state.js
 // (registerExitSignal / confirmPeak), driven by the 3s RPC poller — no setTimeout rechecks.
@@ -146,6 +148,51 @@ async function maybeRunMissedBriefing() {
 
   log("cron", `Missed briefing detected (last sent: ${lastSent || "never"}) — sending now`);
   await runBriefing();
+}
+
+async function runDailySnapshot() {
+  if (_snapshotBusy) return;
+  _snapshotBusy = true;
+  try {
+    const res = await takeSnapshot();
+    if (res.written?.length) {
+      log("cron", `Equity snapshot tertulis: ${res.written.join(", ")}`);
+    }
+  } catch (error) {
+    log("cron_error", `Equity snapshot failed: ${error.message}`);
+  } finally {
+    _snapshotBusy = false;
+  }
+}
+
+/**
+ * Snapshot watchdog (the maybeRunMissedBriefing pattern): takeSnapshot() is
+ * idempotent — today's entry already written means a free no-op — so detection
+ * costs nothing; healGap() then fills interior holes only, as `source:
+ * "derived"` entries. Skips the run entirely before the scheduled minute so a
+ * restart at 00:01 never takes the snapshot without the indexing-lag buffer.
+ */
+async function maybeRunMissedSnapshot() {
+  if (!config.report.snapshotEnabled) return;
+  // "5 0 * * *" → don't fire before 00:05Z; unparseable custom cron → 00:05.
+  const parts = String(config.report.snapshotCronUtc).trim().split(/\s+/);
+  const minute = Number.isFinite(Number(parts[0])) ? Number(parts[0]) : 5;
+  const hour = Number.isFinite(Number(parts[1])) ? Number(parts[1]) : 0;
+  const now = new Date();
+  if (now.getUTCHours() * 60 + now.getUTCMinutes() < hour * 60 + minute) return;
+  await runDailySnapshot();
+  if (_snapshotBusy) return;
+  _snapshotBusy = true;
+  try {
+    const healed = await healGap();
+    if (healed.written?.length) {
+      log("cron", `Ledger heal: ${healed.written.length} window derived (${healed.written.join(", ")})`);
+    }
+  } catch (error) {
+    log("cron_error", `Ledger heal failed: ${error.message}`);
+  } finally {
+    _snapshotBusy = false;
+  }
 }
 
 function stopCronJobs() {
@@ -807,6 +854,21 @@ Summarize the current portfolio health, total fees earned, and performance of al
     await maybeRunMissedBriefing();
   }, { timezone: 'UTC' });
 
+  // Daily equity snapshot (equity-snapshot.js) — window [kemarin 00:00Z, hari
+  // ini 00:00Z), taken at 00:05 for Helius indexing lag. Raw material for the
+  // financial reports; sends NOTHING to Telegram. The 6h watchdog re-takes a
+  // missed snapshot and heals interior holes (source: "derived") only.
+  let snapshotTask = null;
+  let snapshotWatchdog = null;
+  if (config.report.snapshotEnabled) {
+    snapshotTask = cron.schedule(config.report.snapshotCronUtc, async () => {
+      await runDailySnapshot();
+    }, { timezone: 'UTC' });
+    snapshotWatchdog = cron.schedule(`0 */6 * * *`, async () => {
+      await maybeRunMissedSnapshot();
+    }, { timezone: 'UTC' });
+  }
+
   // PnL reconcile — the 30s post-close window often catches the Meteora datapi
   // before the close record settles (booked 0 / placeholder values). Re-fetch
   // settled records and patch lessons.json + pool-memory. Minutes offset from
@@ -962,6 +1024,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   }
 
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, reconcileTask];
+  if (snapshotTask) _cronTasks.push(snapshotTask, snapshotWatchdog);
   // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
   _cronTasks._opportunityPollInterval = opportunityPollInterval;
@@ -1988,6 +2051,7 @@ if (isMain && isTTY) {
   // Always start autonomous cycles on launch
   launchCron();
   maybeRunMissedBriefing().catch(() => { });
+  maybeRunMissedSnapshot().catch(() => { });
 
   startPolling(telegramHandler);
 
@@ -2214,6 +2278,7 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
   log("startup", "Non-TTY mode — starting cron cycles immediately.");
   startCronJobs();
   maybeRunMissedBriefing().catch(() => { });
+  maybeRunMissedSnapshot().catch(() => { });
   startPolling(telegramHandler);
   (async () => {
     try {

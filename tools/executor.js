@@ -248,6 +248,7 @@ function normalizeConfigValue(key, value) {
     "solMode",
     "darwinEnabled",
     "lpAgentRelayEnabled",
+    "reportSnapshotEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads", "jupTrendingCategories", "dexScreenerCategories", "sweepExcludeMints"]);
   const stringKeys = new Set([
@@ -273,6 +274,11 @@ function normalizeConfigValue(key, value) {
     "gmgnTrendingInterval",
     "gmgnTrendingOrderBy",
     "jupTrendingInterval",
+    "reportSnapshotCronUtc",
+    "reportLedgerRole",
+    "reportLedgerDir",
+    "reportRegistryPath",
+    "reportPositionValuation",
   ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
@@ -557,6 +563,15 @@ const toolMap = {
       rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
       rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
       requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
+      // financial report / equity ledger
+      reportSnapshotEnabled: ["report", "snapshotEnabled"],
+      reportSnapshotCronUtc: ["report", "snapshotCronUtc"],
+      reportLedgerRole: ["report", "ledgerRole"],
+      reportLedgerDir: ["report", "ledgerDir"],
+      reportRegistryPath: ["report", "registryPath"],
+      reportWalkOverlapMin: ["report", "walkOverlapMin"],
+      reportDriftToleranceSol: ["report", "driftToleranceSol"],
+      reportPositionValuation: ["report", "positionValuation"],
     };
 
     const applied = {};
@@ -662,7 +677,7 @@ const toolMap = {
     writeJsonAtomic(USER_CONFIG_PATH, userConfig);
 
     // Restart cron jobs if intervals changed
-    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null || applied.pnlPollIntervalSec != null;
+    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null || applied.pnlPollIntervalSec != null || applied.reportSnapshotEnabled != null || applied.reportSnapshotCronUtc != null;
     if (intervalChanged && _cronRestarter) {
       _cronRestarter();
       log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m, pnlPoll: ${config.pnl.pollIntervalSec}s`);

@@ -125,6 +125,15 @@
   "pnlReportSinceIso": null,
   "pnlReportLlmUsdBaseline": null,
 
+  "reportSnapshotEnabled": true,
+  "reportSnapshotCronUtc": "5 0 * * *",
+  "reportLedgerRole": "contributor",
+  "reportLedgerDir": "~/.meridian/ledger",
+  "reportRegistryPath": "~/.meridian/ledger-registry.json",
+  "reportWalkOverlapMin": 30,
+  "reportDriftToleranceSol": 0.001,
+  "reportPositionValuation": "cost",
+
   "gmgnFeeSource": "gmgn",
   "gmgnApiKey": "",
   "gmgnTrendingInterval": "1h",

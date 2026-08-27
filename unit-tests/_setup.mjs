@@ -44,6 +44,28 @@ export function statePath(...segments) {
   return path.join(STATE_DIR, ...segments);
 }
 
+// The equity ledger (equity-snapshot.js) deliberately bypasses repoPath() —
+// it lives in ~/.meridian/ledger so both daemons write where one consolidator
+// reads — so MERIDIAN_STATE_DIR alone does NOT isolate it. Point it into the
+// same temp tree (removed together on exit) so a test can never touch the
+// real ledger.
+if (!process.env.MERIDIAN_LEDGER_DIR) {
+  process.env.MERIDIAN_LEDGER_DIR = path.join(STATE_DIR, "ledger");
+}
+
+export const LEDGER_DIR = path.resolve(process.env.MERIDIAN_LEDGER_DIR);
+
+if (LEDGER_DIR === path.join(os.homedir(), ".meridian", "ledger")) {
+  throw new Error(
+    "unit-tests/_setup.mjs: MERIDIAN_LEDGER_DIR menunjuk ledger sungguhan " +
+    "(~/.meridian/ledger) — unset atau arahkan ke direktori scratch.",
+  );
+}
+
+export function ledgerPath(...segments) {
+  return path.join(LEDGER_DIR, ...segments);
+}
+
 if (created) {
   process.on("exit", () => {
     try { fs.rmSync(STATE_DIR, { recursive: true, force: true }); } catch { /* temp dir, best effort */ }

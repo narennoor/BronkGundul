@@ -378,6 +378,36 @@ export const config = {
     targetLiquidity: Number(u.degenTargetLiquidity ?? 20000),
   },
 
+  // ─── Financial report / equity ledger (equity-snapshot.js) ──────────
+  // Fase 1: daily equity snapshots only — the raw material for the weekly/
+  // monthly/yearly reports of later phases. Nothing here sends anything.
+  report: {
+    snapshotEnabled: u.reportSnapshotEnabled ?? true,
+    // Daily snapshot cron (UTC). 00:05, NOT 00:00 — the five minutes cover
+    // Helius indexing lag on txs landing just before midnight; the snapshot
+    // window itself stays pinned to the 00:00Z boundary regardless.
+    snapshotCronUtc: nonEmptyString(u.reportSnapshotCronUtc, "5 0 * * *"),
+    // primary = also consolidates and sends the group report (later phases);
+    // contributor = writes its own ledger only. Default contributor so a new
+    // daemon can never accidentally double-send group reports — CopetGundul
+    // sets "primary" in its user-config.
+    ledgerRole: nonEmptyString(u.reportLedgerRole, "contributor"),
+    // The ledger lives OUTSIDE repoPath() on purpose: every daemon writes its
+    // own wallet's ledger where one consolidator can read them all, and a
+    // worktree checkout can disappear. MERIDIAN_LEDGER_DIR (env) overrides for
+    // the unit-test suite.
+    ledgerDir: nonEmptyString(u.reportLedgerDir, "~/.meridian/ledger"),
+    registryPath: nonEmptyString(u.reportRegistryPath, "~/.meridian/ledger-registry.json"),
+    // Incremental walk overlap (minutes) behind the previous snapshot's
+    // boundary — catches late-indexed txs; deduped by signature so it's free.
+    walkOverlapMin: Number(u.reportWalkOverlapMin ?? 30),
+    // |Δbalance − Σ walletChange| beyond this marks the window untrusted.
+    driftToleranceSol: Number(u.reportDriftToleranceSol ?? 0.001),
+    // "cost" — position capital = principal + rent, never market value. The
+    // equity identity stays exact against the chain with no price oracle.
+    positionValuation: nonEmptyString(u.reportPositionValuation, "cost"),
+  },
+
   // ─── GMGN (fee source for minTokenFeesSol gate) ──────────────
   gmgn: {
     apiKey: nonEmptyString(gmgnUserConfig.apiKey, u.gmgnApiKey, process.env.GMGN_API_KEY),
