@@ -127,6 +127,8 @@
 
   "reportSnapshotEnabled": true,
   "reportSnapshotCronUtc": "5 0 * * *",
+  "reportWeeklyEnabled": true,
+  "reportMonthlyEnabled": true,
   "reportLedgerRole": "contributor",
   "reportLedgerDir": "~/.meridian/ledger",
   "reportRegistryPath": "~/.meridian/ledger-registry.json",

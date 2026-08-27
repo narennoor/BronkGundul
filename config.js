@@ -392,6 +392,10 @@ export const config = {
     // daemon can never accidentally double-send group reports — CopetGundul
     // sets "primary" in its user-config.
     ledgerRole: nonEmptyString(u.reportLedgerRole, "contributor"),
+    // Periodic reports (fase 2). Cron 00:20 Senin (mingguan) / 00:30 tgl 1
+    // (bulanan) UTC — hanya jalan pada role primary.
+    weeklyEnabled: u.reportWeeklyEnabled ?? true,
+    monthlyEnabled: u.reportMonthlyEnabled ?? true,
     // The ledger lives OUTSIDE repoPath() on purpose: every daemon writes its
     // own wallet's ledger where one consolidator can read them all, and a
     // worktree checkout can disappear. MERIDIAN_LEDGER_DIR (env) overrides for

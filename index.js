@@ -27,7 +27,8 @@ import {
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { takeSnapshot, healGap } from "./equity-snapshot.js";
+import { takeSnapshot, healGap, loadSnapshots, ledgerWalletAddress } from "./equity-snapshot.js";
+import { ensurePeriodSealed, formatFinancialReport, lastClosedPeriodId, periodBounds } from "./financial-report.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
@@ -97,6 +98,7 @@ let _managementBusy = false; // prevents overlapping management cycles
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _reconcileBusy = false;  // prevents overlapping PnL reconcile runs
 let _snapshotBusy = false;   // prevents overlapping equity-ledger snapshot/heal runs
+let _sealBusy = false;       // prevents overlapping period seal/report runs
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 // Exit/peak confirmation is now done by consecutive-tick counting in state.js
 // (registerExitSignal / confirmPeak), driven by the 3s RPC poller — no setTimeout rechecks.
@@ -193,6 +195,50 @@ async function maybeRunMissedSnapshot() {
   } finally {
     _snapshotBusy = false;
   }
+  await maybeRunMissedPeriodReports();
+}
+
+/**
+ * Seal the just-closed period and send its report (fase 2: week + month).
+ * Sealing is pure arithmetic over the ledger files — zero Helius. With
+ * `onlyIfUnsealed` (watchdog path) an already-sealed period sends nothing, so
+ * a report can never go out twice.
+ */
+async function runPeriodReport(kind, { onlyIfUnsealed = false } = {}) {
+  if (_sealBusy) return;
+  _sealBusy = true;
+  try {
+    const id = lastClosedPeriodId(kind);
+    // A seal is immutable — never seal until the closing boundary snapshot
+    // exists (00:05 cron / heal first), or a wrong endpoint gets baked in.
+    const { to } = periodBounds(kind, id);
+    const snaps = loadSnapshots(ledgerWalletAddress()).snapshots;
+    if (!snaps.some((s) => Date.parse(s.boundary_ts) === to)) {
+      log("cron", `Laporan ${kind} ${id} ditunda — snapshot boundary ${new Date(to).toISOString().slice(0, 10)} belum ada`);
+      return;
+    }
+    const { record, sealedNow } = ensurePeriodSealed(kind, id);
+    if (onlyIfUnsealed && !sealedNow) return;
+    const msg = formatFinancialReport({ wallet: ledgerWalletAddress(), record }, { html: true });
+    if (telegramEnabled()) await sendHTML(msg);
+    log("cron", `Laporan ${kind} ${id} ${sealedNow ? "disegel & " : ""}terkirim — integrity_ok=${record.integrity.integrity_ok}`);
+  } catch (error) {
+    log("cron_error", `Laporan ${kind} gagal: ${error.message}`);
+  } finally {
+    _sealBusy = false;
+  }
+}
+
+/**
+ * Watchdog tail (the maybeRunMissedBriefing idea, for seals): a daemon that
+ * slept through Monday 00:20 or the 1st 00:30 seals the leftover period on
+ * the next 6h tick / startup — a hole in the seal chain would otherwise trip
+ * assertion 7 on every later period. onlyIfUnsealed keeps re-sends impossible.
+ */
+async function maybeRunMissedPeriodReports() {
+  if (config.report.ledgerRole !== "primary") return;
+  if (config.report.weeklyEnabled) await runPeriodReport("week", { onlyIfUnsealed: true });
+  if (config.report.monthlyEnabled) await runPeriodReport("month", { onlyIfUnsealed: true });
 }
 
 function stopCronJobs() {
@@ -869,6 +915,25 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }, { timezone: 'UTC' });
   }
 
+  // Periodic financial reports (fase 2) — primary role only: with two daemons
+  // in one Telegram chat, a contributor sending its own copy would double
+  // every report. 00:20/00:30 leave the 00:05 snapshot a head start, so a
+  // period close never races its own raw material.
+  let weeklyReportTask = null;
+  let monthlyReportTask = null;
+  if (config.report.ledgerRole === "primary") {
+    if (config.report.weeklyEnabled) {
+      weeklyReportTask = cron.schedule(`20 0 * * 1`, async () => {
+        await runPeriodReport("week");
+      }, { timezone: 'UTC' });
+    }
+    if (config.report.monthlyEnabled) {
+      monthlyReportTask = cron.schedule(`30 0 1 * *`, async () => {
+        await runPeriodReport("month");
+      }, { timezone: 'UTC' });
+    }
+  }
+
   // PnL reconcile — the 30s post-close window often catches the Meteora datapi
   // before the close record settles (booked 0 / placeholder values). Re-fetch
   // settled records and patch lessons.json + pool-memory. Minutes offset from
@@ -1025,6 +1090,8 @@ Summarize the current portfolio health, total fees earned, and performance of al
 
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, reconcileTask];
   if (snapshotTask) _cronTasks.push(snapshotTask, snapshotWatchdog);
+  if (weeklyReportTask) _cronTasks.push(weeklyReportTask);
+  if (monthlyReportTask) _cronTasks.push(monthlyReportTask);
   // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
   _cronTasks._opportunityPollInterval = opportunityPollInterval;
@@ -1510,6 +1577,7 @@ function formatHelpText() {
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
     "/pnl — full PnL report (bookkeeping vs on-chain, all costs)",
+    "/report week | month | <YYYY-Www> | <YYYY-MM> — laporan keuangan dari ledger (0 Helius)",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
@@ -1646,6 +1714,37 @@ async function telegramHandler(msg) {
       await sendHTML(briefing);
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/report" || text.startsWith("/report ")) {
+    const arg = (text.split(/\s+/)[1] || "").trim();
+    try {
+      let kind = null;
+      let id = null;
+      if (arg === "week" || arg === "month") {
+        kind = arg;
+        id = lastClosedPeriodId(kind);
+      } else if (/^\d{4}-W\d{2}$/i.test(arg)) {
+        kind = "week";
+        id = arg.toUpperCase();
+      } else if (/^\d{4}-\d{2}$/.test(arg)) {
+        kind = "month";
+        id = arg;
+      } else if (arg === "ytd" || arg === "year" || /^\d{4}$/.test(arg)) {
+        await sendMessage("Laporan tahunan/YTD menyusul di fase 3.").catch(() => {});
+        return;
+      } else {
+        await sendMessage("Pakai: /report week | month | <YYYY-Www> | <YYYY-MM>").catch(() => {});
+        return;
+      }
+      // ensurePeriodSealed seals a closed-but-unsealed period on demand;
+      // an existing seal is returned as-is (immutable, never resealed here).
+      const report = ensurePeriodSealed(kind, id);
+      await sendHTML(formatFinancialReport(report, { html: true }));
+    } catch (e) {
+      await sendMessage(`Laporan gagal: ${e.message}`).catch(() => {});
     }
     return;
   }

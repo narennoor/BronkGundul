@@ -44,4 +44,5 @@ gets its own state dir, so there is no file-level race either way.
 | `recheck-suspect.test.mjs` | `isCashSuspect()` — the default recheck-cash filter, rent-refund allowance |
 | `hard-tp.test.mjs` | `hardTakeProfitPct` ceiling fast-path (era #10 GUNICORN incident) |
 | `pnl-cutoff.test.mjs` | `/pnl` reporting cutoff — `resolveReportCutoff`/`applyCutoff`, `classifyCashFlows` classification, report rendering |
+| `financial-report.test.mjs` | fase-2 seals & reports — seal chain per kind (test d), immutable seal / explicit reseal (test e), assertions 1–7 as labels, missing-window & missing-endpoint behavior, §06 formatting, and a fetch stub that throws: the whole seal/report path is zero-network |
 | `equity-snapshot.test.mjs` | daily equity ledger — zero-walk rule (test a), signed-bridge identity (test g), window assignment + overlap sig dedup, late-indexed tx conservation, integrity drift, idempotency, derived backfill, `healGap`. Uses `MERIDIAN_LEDGER_DIR` (set by `_setup.mjs`) because the ledger bypasses `repoPath()` |

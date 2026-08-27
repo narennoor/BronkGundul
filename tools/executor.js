@@ -249,6 +249,8 @@ function normalizeConfigValue(key, value) {
     "darwinEnabled",
     "lpAgentRelayEnabled",
     "reportSnapshotEnabled",
+    "reportWeeklyEnabled",
+    "reportMonthlyEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads", "jupTrendingCategories", "dexScreenerCategories", "sweepExcludeMints"]);
   const stringKeys = new Set([
@@ -566,6 +568,8 @@ const toolMap = {
       // financial report / equity ledger
       reportSnapshotEnabled: ["report", "snapshotEnabled"],
       reportSnapshotCronUtc: ["report", "snapshotCronUtc"],
+      reportWeeklyEnabled: ["report", "weeklyEnabled"],
+      reportMonthlyEnabled: ["report", "monthlyEnabled"],
       reportLedgerRole: ["report", "ledgerRole"],
       reportLedgerDir: ["report", "ledgerDir"],
       reportRegistryPath: ["report", "registryPath"],

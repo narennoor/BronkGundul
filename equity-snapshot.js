@@ -118,10 +118,12 @@ export function snapshotAtOrBefore(snapshots, when) {
 
 // ─── read-only inputs (state.json / lessons.json / env) ──────────────
 
-function getWalletAddress() {
+/** This daemon's wallet address — the ledger key. Exported for financial-report.js. */
+export function ledgerWalletAddress() {
   if (!process.env.WALLET_PRIVATE_KEY) throw new Error("WALLET_PRIVATE_KEY not set");
   return Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY)).publicKey.toString();
 }
+const getWalletAddress = ledgerWalletAddress;
 
 function llmKeyId() {
   const key = process.env.OPENROUTER_API_KEY || process.env.LLM_API_KEY;
@@ -587,4 +589,340 @@ export async function healGap(from = null, to = null) {
     log("ledger", `healGap: ${written.length} window bolong disembuhkan (${written.join(", ")}) — source=derived, trusted=false`);
   }
   return { written };
+}
+
+// ─── periods: seal mingguan / bulanan (fase 2) ───────────────────────
+//
+// A seal is the immutable close of one calendar period, folded PURELY from the
+// daily snapshots — zero Helius calls, zero RPC, files only. Chains run PER
+// KIND: week seals chain to week seals, month to month; monthly numbers are
+// always folded straight from daily snapshots, never from weekly sums (ISO
+// weeks cross month boundaries).
+
+const WEEK_MS = 7 * DAY_MS;
+
+const isoZ = (ms) => new Date(ms).toISOString().replace(".000Z", "Z");
+
+function isoWeek1Monday(year) {
+  // ISO-8601: week 1 is the week containing Jan 4.
+  const jan4 = Date.UTC(year, 0, 4);
+  const dow = (new Date(jan4).getUTCDay() + 6) % 7; // 0 = Monday
+  return jan4 - dow * DAY_MS;
+}
+
+/** ISO week id (YYYY-Www) of the UTC day containing `ts`. */
+export function isoWeekIdFor(ts) {
+  const d = dayBoundaryUtc(ts);
+  const monday = d - ((new Date(d).getUTCDay() + 6) % 7) * DAY_MS;
+  const year = new Date(monday + 3 * DAY_MS).getUTCFullYear(); // the Thursday decides
+  const week = Math.round((monday - isoWeek1Monday(year)) / WEEK_MS) + 1;
+  return `${year}-W${String(week).padStart(2, "0")}`;
+}
+
+/** Half-open [from, to) bounds of a period id, pure UTC. */
+export function periodBounds(kind, id) {
+  if (kind === "week") {
+    const m = /^(\d{4})-W(\d{2})$/.exec(String(id));
+    if (!m) throw new Error(`id minggu tidak valid: "${id}" — format ISO YYYY-Www, mis. 2026-W35`);
+    const from = isoWeek1Monday(Number(m[1])) + (Number(m[2]) - 1) * WEEK_MS;
+    return { from, to: from + WEEK_MS };
+  }
+  if (kind === "month") {
+    const m = /^(\d{4})-(\d{2})$/.exec(String(id));
+    if (!m || Number(m[2]) < 1 || Number(m[2]) > 12) {
+      throw new Error(`id bulan tidak valid: "${id}" — format YYYY-MM, mis. 2026-08`);
+    }
+    return { from: Date.UTC(Number(m[1]), Number(m[2]) - 1, 1), to: Date.UTC(Number(m[1]), Number(m[2]), 1) };
+  }
+  throw new Error(`kind "${kind}" belum didukung — fase 2: week | month`);
+}
+
+/** Period id containing `ts`. */
+export function periodIdFor(kind, ts) {
+  if (kind === "week") return isoWeekIdFor(ts);
+  if (kind === "month") return new Date(dayBoundaryUtc(ts)).toISOString().slice(0, 7);
+  throw new Error(`kind "${kind}" belum didukung — fase 2: week | month`);
+}
+
+/** Calendar-previous period id of the same kind. */
+export function prevPeriodId(kind, id) {
+  return periodIdFor(kind, periodBounds(kind, id).from - DAY_MS);
+}
+
+/** The most recent fully-closed period at `now` — the one the cron seals. */
+export function lastClosedPeriodId(kind, now = Date.now()) {
+  return prevPeriodId(kind, periodIdFor(kind, now));
+}
+
+function periodsFileFor(address) {
+  return path.join(resolveLedgerDir(), address, "periods.json");
+}
+
+/** Read a wallet's sealed periods. Missing file → empty; corrupt → THROWS. */
+export function loadPeriods(address) {
+  return readJsonStore(periodsFileFor(address), { version: 1, address, periods: [] });
+}
+
+function savePeriods(address, store) {
+  const file = periodsFileFor(address);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  store.periods.sort((a, b) =>
+    a.from < b.from ? -1 : a.from > b.from ? 1 : a.kind.localeCompare(b.kind),
+  );
+  writeJsonAtomic(file, store);
+}
+
+/**
+ * Fold one period record from the snapshot ledger. PURE — files already
+ * loaded, no network, no filesystem. Exported for the unit suite and for the
+ * fase-3 YTD fold, which reuses this on the running month.
+ *
+ * Assertion failures (§10 nos. 1–7) land in integrity.assertions_failed and
+ * flip integrity.integrity_ok — they NEVER throw: a report with a label beats
+ * a report that refuses to exist. What DOES throw is missing raw material:
+ * sealing needs the exact opening and closing boundary snapshots, because a
+ * seal is immutable and a substituted endpoint would bake a wrong number in
+ * forever (the watchdog heals snapshots first, then seals).
+ *
+ * §07 shape plus four deliberate additions, all needed to keep sealed reports
+ * self-contained once snapshots.json grows past them: pnl.closes, pnl.wins
+ * (win_rate is recomputed, never summed), sol_price_close (the §09 CSV
+ * column + USD derivation), integrity.integrity_ok.
+ */
+export function computePeriodRecord({
+  kind,
+  id,
+  snapshots,
+  prevSeal = null,
+  prevSealExpected = false,
+  driftToleranceSol = 0.001,
+  sealedAtIso = null,
+}) {
+  const { from, to } = periodBounds(kind, id);
+  const assertions = [];
+  const note = (s) => assertions.push(s);
+  const eq = (x, y, tol = 1e-9) => Math.abs(x - y) <= tol;
+
+  const opening = snapshots.find((s) => Date.parse(s.boundary_ts) === from);
+  const closing = snapshots.find((s) => Date.parse(s.boundary_ts) === to);
+  if (!opening || !closing) {
+    throw new Error(
+      `Tidak bisa menyegel ${kind} ${id}: snapshot boundary ${!opening ? snapshotIdFor(from) : snapshotIdFor(to)} ` +
+      `belum ada di ledger — jalankan snapshot/heal dulu (seal immutable, endpoint pengganti akan membekukan angka yang salah)`,
+    );
+  }
+
+  // Window snapshots: boundary in (from, to] — snapshot id X covers [X−1d, X).
+  const win = snapshots.filter((s) => {
+    const b = Date.parse(s.boundary_ts);
+    return b > from && b <= to;
+  });
+  const expected = Math.round((to - from) / DAY_MS);
+  if (win.length !== expected) note(`windows:${win.length}/${expected} snapshot bolong`);
+
+  // ── additive fold ──
+  let dep = 0, wd = 0, gas = 0, feeLp = 0, netRev = 0, liqGap = 0, closes = 0, wins = 0;
+  const timedFlows = []; // { ts(sec), sol(signed) } — exact timing for Dietz
+  for (const s of win) {
+    dep += s.flows.deposit_in_sol;
+    wd += s.flows.withdraw_out_sol;
+    gas += s.flows.gas_sol;
+    feeLp += s.book.fee_lp_sol;
+    netRev += s.book.net_revenue_sol;
+    liqGap += s.book.liquidation_gap_sol;
+    closes += s.book.closed;
+    wins += s.book.wins;
+    for (const t of s.flows.transfers || []) {
+      timedFlows.push({ ts: t.ts, sol: t.dir === "in" ? t.amount_sol : -t.amount_sol });
+    }
+  }
+  // Everything signed in the record: pendapatan positif, biaya negatif.
+  const depositSol = round9(dep);
+  const withdrawalSol = round9(-wd);
+  const gasFeeSol = round9(-gas);
+  const feeLpSol = round9(feeLp);
+  const netRevenueSol = round9(netRev);
+  const ilSol = round9(netRevenueSol - feeLpSol); // IL is the residual after fees — signed, may be positive
+
+  // ── equity endpoints ──
+  const saldoAwal = opening.equity.total_sol;
+  const totalEkuitas = closing.equity.total_sol;
+  const modalDasar = round9(saldoAwal + depositSol + withdrawalSol);
+  const saldoBebas = closing.equity.saldo_bebas_sol;
+  const modalPosisi = closing.equity.modal_posisi_sol;
+  const labaKumulatif = round9(totalEkuitas - modalDasar);
+  const grossRill = round9(totalEkuitas - saldoAwal - (depositSol + withdrawalSol));
+  const execCost = round9(grossRill - netRevenueSol - gasFeeSol); // the plug row
+
+  // ── LLM: lifetime reading diff between the endpoints, same key only ──
+  const solPriceClose = Number.isFinite(closing.sol_price) ? closing.sol_price : null;
+  let llmUsd = null;
+  let llmSol = null;
+  if (
+    Number.isFinite(opening.llm_usd_lifetime) && Number.isFinite(closing.llm_usd_lifetime) &&
+    opening.llm_key_id && opening.llm_key_id === closing.llm_key_id
+  ) {
+    llmUsd = -Math.round(Math.max(0, closing.llm_usd_lifetime - opening.llm_usd_lifetime) * 100) / 100;
+    llmSol = solPriceClose > 0 ? round9(llmUsd / solPriceClose) : null;
+  }
+  const netRill = round9(grossRill + (llmSol ?? 0));
+
+  const mm = closing.market_memo || {};
+  const unrealized = Number.isFinite(mm.nilai_pasar_sol) ? round9(mm.nilai_pasar_sol - modalPosisi) : null;
+
+  const allTrusted = win.length > 0 && win.every((s) => s.integrity?.trusted === true);
+  const cumDrift = round9(win.reduce((s, w) => s + (w.integrity?.drift_sol || 0), 0));
+
+  // ── assertions 1–7 (§10). 1–6 are tautological when the code is right —
+  // that is the point: they catch sign and rounding bugs. 7 is the sharp one. ──
+  if (!eq(netRevenueSol, feeLpSol + ilSol)) note(`1:net_revenue ${netRevenueSol} != fee_lp+il ${round9(feeLpSol + ilSol)}`);
+  if (!eq(grossRill, netRevenueSol + execCost + gasFeeSol)) note(`2:gross_rill ${grossRill} != net_revenue+exec+gas ${round9(netRevenueSol + execCost + gasFeeSol)}`);
+  if (!eq(netRill, grossRill + (llmSol ?? 0))) note(`3:net_rill ${netRill} != gross_rill+llm ${round9(grossRill + (llmSol ?? 0))}`);
+  if (!eq(modalDasar, saldoAwal + depositSol + withdrawalSol)) note(`4:modal_dasar ${modalDasar} != saldo_awal+deposit+withdrawal`);
+  if (!eq(totalEkuitas, round9(saldoBebas + modalPosisi))) note(`5:total_ekuitas ${totalEkuitas} != saldo_bebas+modal_posisi ${round9(saldoBebas + modalPosisi)}`);
+  if (!eq(labaKumulatif, grossRill, driftToleranceSol)) note(`6:laba_kumulatif ${labaKumulatif} != gross_rill ${grossRill}`);
+  if (prevSeal) {
+    if (!eq(saldoAwal, prevSeal.equity.total_ekuitas_sol)) {
+      note(`7:saldo_awal ${saldoAwal} != total_ekuitas seal ${prevSeal.id} (${prevSeal.equity.total_ekuitas_sol}) — snapshot hilang atau seal tertimpa`);
+    }
+  } else if (prevSealExpected) {
+    note(`7:seal ${prevPeriodId(kind, id)} tidak ada — rantai ${kind} putus`);
+  }
+
+  // ── ROI ──
+  // Modified Dietz over TOTAL equity, flows weighted by their exact timestamps
+  // (flows.transfers[] — this is why per-transfer ts is recorded at snapshot
+  // time). Numerator is Net Rill: LLM is a real operating cost.
+  const spanMs = to - from;
+  let weighted = 0;
+  for (const f of timedFlows) {
+    const w = Math.min(1, Math.max(0, (to - f.ts * 1000) / spanMs));
+    weighted += w * f.sol;
+  }
+  const dietzBase = saldoAwal + weighted;
+  const dietzPct = dietzBase > 1e-9 ? Math.round((netRill / dietzBase) * 10000) / 100 : null;
+
+  // TWR: chained daily sub-period returns, flows treated as start-of-day.
+  // Daily LLM cost joins the numerator when both endpoints of the day carry a
+  // same-key lifetime reading (light snapshots do; derived days skip it).
+  let twr = 1;
+  let prevSnap = opening;
+  for (const s of win) {
+    const flowNet = s.flows.deposit_in_sol - s.flows.withdraw_out_sol;
+    let llmDaySol = 0;
+    if (
+      Number.isFinite(prevSnap.llm_usd_lifetime) && Number.isFinite(s.llm_usd_lifetime) &&
+      prevSnap.llm_key_id && prevSnap.llm_key_id === s.llm_key_id && s.sol_price > 0
+    ) {
+      llmDaySol = Math.max(0, s.llm_usd_lifetime - prevSnap.llm_usd_lifetime) / s.sol_price;
+    }
+    const base = prevSnap.equity.total_sol + flowNet;
+    if (base > 1e-9) {
+      twr *= 1 + (s.equity.total_sol - prevSnap.equity.total_sol - flowNet - llmDaySol) / base;
+    }
+    prevSnap = s;
+  }
+  const twrPct = Math.round((twr - 1) * 10000) / 100;
+
+  // Freeze what was folded: a later edit of any window snapshot no longer
+  // matches this hash, so "seal vs snapshot" disputes are decidable.
+  const snapshotsHash = crypto
+    .createHash("sha256")
+    .update(JSON.stringify([opening, ...win]))
+    .digest("hex");
+
+  return {
+    id,
+    kind,
+    prev_seal_id: prevSeal?.id ?? null,
+    from: isoZ(from),
+    to: isoZ(to),
+    pnl: {
+      fee_lp_sol: feeLpSol,
+      impermanent_loss_sol: ilSol,
+      net_revenue_sol: netRevenueSol,
+      exec_cost_sol: execCost,
+      exec_cost_measured_sol: round9(liqGap),
+      gas_fee_sol: gasFeeSol,
+      gross_rill_sol: grossRill,
+      llm_cost_sol: llmSol,
+      llm_cost_usd: llmUsd,
+      net_rill_sol: netRill,
+      closes,
+      wins,
+    },
+    equity: {
+      saldo_awal_sol: saldoAwal,
+      deposit_sol: depositSol,
+      withdrawal_sol: withdrawalSol,
+      modal_dasar_sol: modalDasar,
+      saldo_bebas_sol: saldoBebas,
+      modal_posisi_sol: modalPosisi,
+      modal_posisi_rent_sol: closing.equity.rent_sol,
+      total_ekuitas_sol: totalEkuitas,
+      laba_kumulatif_sol: labaKumulatif,
+      unrealized_pnl_sol: unrealized,
+      unrealized_suspect: !!mm.suspect,
+    },
+    roi: { dietz_pct: dietzPct, twr_pct: twrPct },
+    integrity: {
+      windows: win.length,
+      all_trusted: allTrusted,
+      cum_drift_sol: cumDrift,
+      integrity_ok: assertions.length === 0,
+      assertions_failed: assertions,
+    },
+    sol_price_close: solPriceClose,
+    sealed_at: sealedAtIso,
+    snapshots_hash: snapshotsHash,
+  };
+}
+
+/**
+ * Seal one closed period. THROWS if the id is already sealed — a seal is
+ * immutable, and a cron bug must never silently rewrite August (§10). Pass
+ * `{ reseal: true }` ONLY from an explicit operator action (--reseal).
+ * Pure arithmetic over local files: zero Helius, zero RPC.
+ */
+export function sealPeriod(kind, id, { reseal = false, now = Date.now() } = {}) {
+  const wallet = getWalletAddress();
+  const { from, to } = periodBounds(kind, id); // validates kind + id
+  if (to > now) {
+    throw new Error(`${kind} ${id} belum tutup (batasnya ${isoZ(to)}) — periode berjalan tidak disegel`);
+  }
+  const store = loadPeriods(wallet);
+  const existing = store.periods.find((p) => p.kind === kind && p.id === id);
+  if (existing && !reseal) {
+    throw new Error(
+      `Seal ${kind} ${id} sudah ada (sealed_at ${existing.sealed_at}) — seal immutable. ` +
+      `Pakai --reseal hanya kalau memang sengaja menimpa`,
+    );
+  }
+
+  const snapshots = loadSnapshots(wallet).snapshots;
+  const prevId = prevPeriodId(kind, id);
+  const prevSeal = store.periods.find((p) => p.kind === kind && p.id === prevId) ?? null;
+  // An older seal of this kind existing while the adjacent one is missing is a
+  // hole in the chain — flagged (assertion 7), not fatal.
+  const prevSealExpected = !prevSeal && store.periods.some((p) => p.kind === kind && Date.parse(p.to) <= from);
+
+  const record = computePeriodRecord({
+    kind,
+    id,
+    snapshots,
+    prevSeal,
+    prevSealExpected,
+    driftToleranceSol: Number(config.report.driftToleranceSol ?? 0.001),
+    sealedAtIso: new Date(now).toISOString(),
+  });
+
+  if (existing) store.periods = store.periods.filter((p) => !(p.kind === kind && p.id === id));
+  store.periods.push(record);
+  savePeriods(wallet, store);
+  log(
+    "ledger",
+    `Seal ${kind} ${id}${reseal && existing ? " (RESEAL)" : ""}: net_rill ${record.pnl.net_rill_sol} SOL, ` +
+    `integrity_ok=${record.integrity.integrity_ok}${record.integrity.assertions_failed.length ? ` [${record.integrity.assertions_failed.join("; ")}]` : ""}`,
+  );
+  return record;
 }
