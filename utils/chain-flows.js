@@ -5,10 +5,12 @@
 // sealed periods → consolidated reports) can walk and classify flows WITHOUT
 // importing pnl-report.js. That import ban is deliberate: pnl-report owns the
 // full-history walk, and the ledger's zero-walk rule says report code must
-// never be one import away from re-walking the chain. The only sanctioned
-// fetchAllTxs caller on the ledger path is equity-snapshot.js, and its
-// stopBeforeSec is ALWAYS derived from the previous snapshot — never from a
-// constant, never from config.
+// never be one import away from re-walking the chain. The only RECURRING
+// sanctioned fetchAllTxs caller on the ledger path is equity-snapshot.js, and
+// its stopBeforeSec is ALWAYS derived from the previous snapshot — never from
+// a constant, never from config. The single exception is the ONE-SHOT history
+// seed (equity-seed.js, fase 6) — one full walk per wallet to establish the
+// first anchor, never imported by report code, never run by cron.
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -63,11 +65,13 @@ export async function fetchTxPage(url, { retries = 5 } = {}) {
  * flowSum === balance check is available) and `reachedCutoff` (we paged back
  * past the cutoff — the in-scope window is whole).
  */
-export async function fetchAllTxs(wallet, heliusKey, { stopBeforeSec = null, known = null } = {}) {
+export async function fetchAllTxs(wallet, heliusKey, { stopBeforeSec = null, known = null, maxPages = 100 } = {}) {
   const txs = [];
   let before;
   let pageDelay = PAGE_DELAY_MS;
-  for (let page = 0; page < 100; page++) {
+  // maxPages 100 (10k txs) covers every recurring caller; only the one-shot
+  // seed (equity-seed.js) raises it — its cutoff reaches weeks back.
+  for (let page = 0; page < maxPages; page++) {
     const url = new URL(`https://api.helius.xyz/v0/addresses/${wallet}/transactions`);
     url.searchParams.set("api-key", heliusKey);
     url.searchParams.set("limit", "100");
