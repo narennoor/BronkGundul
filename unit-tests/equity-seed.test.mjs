@@ -301,3 +301,46 @@ test("genesis placeholder: saldo tervalidasi, window diisi, angka terukur dipert
   assert.equal(chain.ok, true, chain.problems.join("; "));
   assert.deepEqual(chain.counts, { week: 3, month: 0, year: 0 });
 });
+
+// ── backfill mundur: seed kedua dengan --from lebih awal ─────────────
+// Insiden nyata 28 Agu 2026: ledger Copet di-seed dari 21 Jul padahal
+// aktivitas wallet mulai 6 Jul — seed kedua harus menulis entri di DEPAN
+// sejarah yang ada, mengisi window anchor lama (kalau tidak, flow/book
+// window itu hilang dari seal minggu yang menaunginya), menyegel minggu
+// baru di depan rantai TANPA menyentuh seal lama, dan tetap hijau.
+
+test("backfill: entri baru di depan, window anchor lama terisi, rantai tersambung", async () => {
+  const W6 = mkWallet();
+  useWallet(W6);
+
+  // seed pertama dari 10 Agu (Senin) — anchor 10 Agu tanpa window
+  const res1 = await seedLedger({ from: "2026-08-10", now: NOW });
+  assert.equal(res1.written[0], "2026-08-10");
+  assert.deepEqual(res1.sealed.map((s) => s.id), ["2026-W33", "2026-W34"]);
+  const anchor1 = loadSnapshots(W6.address).snapshots.find((s) => s.id === "2026-08-10");
+  assert.equal(anchor1.integrity.txs, 0);
+  close(anchor1.flows.gas_sol, 0);
+
+  // seed kedua mundur ke 1 Agu — walk ulang, semua entri lama tervalidasi
+  useWallet(W6);
+  const res2 = await seedLedger({ from: "2026-08-01", now: NOW });
+  assert.equal(res2.walked, true);
+  assert.deepEqual(res2.written, ["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04",
+    "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-08", "2026-08-09"]);
+  assert.deepEqual(res2.merged, ["2026-08-10"]); // anchor lama: window diisi
+  assert.ok(res2.validated.length >= 18, `validasi ${res2.validated.length} entri lama`);
+
+  const byId = new Map(loadSnapshots(W6.address).snapshots.map((s) => [s.id, s]));
+  const a = byId.get("2026-08-10");
+  close(a.equity.saldo_bebas_sol, r9(9.999 + 9 * 0.004 + 5)); // angka terukur tetap
+  close(a.flows.gas_sol, 0.001); // window [9, 10) kini terisi: trade 9 Agu 06:00
+  assert.equal(a.integrity.txs, 1);
+  const d3 = byId.get("2026-08-03");
+  assert.equal(d3.flows.transfers[0]?.sig, "DEP5"); // deposit 2 Agu tercatat di entri baru
+
+  // W32 tersegel di DEPAN rantai; W33/W34 lama tak disentuh (immutable)
+  assert.deepEqual(res2.sealed.map((s) => s.id), ["2026-W32"]);
+  assert.ok(res2.skippedSeals.some((s) => /W33/.test(s)) && res2.skippedSeals.some((s) => /W34/.test(s)));
+  assert.equal(res2.chain.ok, true, res2.chain.problems.join("; "));
+  assert.equal(res2.chain.counts.week, 3);
+});

@@ -271,8 +271,17 @@ export async function seedLedger({ from, now = Date.now(), dryRun = false, maxPa
       if (!prior) {
         newEntries.push(entry);
         summary.written.push(entry.id);
-      } else if (prior.source === "genesis" && (prior.integrity?.txs ?? 0) === 0) {
-        // Placeholder genesis: isi window-nya, pertahankan angka terukurnya.
+      } else if (
+        (prior.integrity?.txs ?? 0) === 0 &&
+        (prior.source === "genesis" || (prior.source === "seeded" && b > fromMs))
+      ) {
+        // Dua kasus merge, satu perlakuan: (a) placeholder genesis, dan
+        // (b) BACKFILL — anchor pembuka seed sebelumnya, yang window-nya
+        // sengaja kosong karena data sebelum `from` lamanya tidak ada; walk
+        // yang sekarang mundur melewatinya MEMBAWA data window itu. Isi
+        // flows/book-nya, pertahankan seluruh angka ekuitas terukur (sudah
+        // tervalidasi anchor di atas) — tanpa ini, flow/book window tersebut
+        // hilang dari seal periode yang menaunginya dan salah terbaca PnL.
         prior.flows = entry.flows;
         prior.book = entry.book;
         prior.window_sigs = entry.window_sigs;
