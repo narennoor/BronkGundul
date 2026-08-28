@@ -496,10 +496,10 @@ test("test g — gross_rill == net_revenue + exec_cost + gas_fee (signed, costs 
     driftToleranceSol: 0.001,
   });
 
-  // §07 shape — every top-level key present
+  // §07 shape — every top-level key present (+ llm_credits, memo kas §14)
   assert.deepEqual(Object.keys(entry), [
     "id", "boundary_ts", "taken_at", "source", "equity", "market_memo",
-    "flows", "book", "sol_price", "llm_usd_lifetime", "llm_key_id",
+    "flows", "book", "sol_price", "llm_usd_lifetime", "llm_key_id", "llm_credits",
     "integrity", "window_sigs",
   ]);
   assert.deepEqual(Object.keys(entry.equity), [

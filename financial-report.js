@@ -7,8 +7,12 @@
 // one import away from it. Everything here is arithmetic over the ledger files:
 // zero Helius, zero RPC.
 
+import path from "path";
 import { config } from "./config.js";
 import { log } from "./logger.js";
+import { readJsonStore } from "./utils/json-store.js";
+import { loadRegistry, resolveRegistryPath } from "./ledger-registry.js";
+import { readLedger } from "./ledger-transport.js";
 import {
   sealPeriod,
   loadPeriods,
@@ -349,6 +353,94 @@ const fmtSol = (v, sign = true) =>
 const fmtUsd = (v, sign = true) =>
   v == null ? "n/a" : `${v < 0 ? "-" : sign ? "+" : ""}$${Math.abs(v).toFixed(2)}`;
 const fmtPct = (v) => (v == null ? "n/a" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`);
+
+// ─── kas LLM prabayar (memo USD, §14) ────────────────────────────────
+
+const llmDepositsPath = () =>
+  process.env.MERIDIAN_LLM_DEPOSITS_PATH ||
+  path.join(path.dirname(resolveRegistryPath()), "llm-deposits.json");
+
+/**
+ * Memo kas prabayar OpenRouter untuk boundary penutup sebuah record — murni
+ * berkas lokal (aturan nol-network jalur laporan tetap utuh): pembacaan
+ * `/credits` yang direkam snapshot harian (llm_credits) + berkas deposit
+ * operator (~/.meridian/llm-deposits.json, pola registry — satu baris per
+ * top-up) + pembacaan lifetime key grup dari ledger registry. null bila
+ * boundary itu belum punya pembacaan (entri seeded/derived, atau sebelum
+ * fitur ini hidup 28 Agu 2026) — bloknya disembunyikan, bukan menebak.
+ *
+ * Kredit adalah aset USD level AKUN yang juga dipakai key di luar grup —
+ * keputusan sadar (28 Agu 2026, operator): tampil sebagai MEMO, sengaja
+ * TIDAK pernah masuk total_ekuitas_sol/ROI mana pun. Ekuitas SOL tetap
+ * dijangkar chain; assertion 1–10 tidak menyentuh blok ini.
+ */
+export function llmCreditsMemo(record) {
+  try {
+    const closeMs = Date.parse(record.as_of ?? record.to);
+    if (!Number.isFinite(closeMs)) return null;
+    const at = snapshotAtOrBefore(loadSnapshots(ledgerWalletAddress()).snapshots, closeMs);
+    const credits = at?.llm_credits;
+    if (!Number.isFinite(credits?.total_credits_usd) || !Number.isFinite(credits?.total_usage_usd)) return null;
+
+    let depositsUsd = null;
+    let depositCount = 0;
+    const dep = readJsonStore(llmDepositsPath(), null);
+    if (dep && Array.isArray(dep.deposits)) {
+      const rows = dep.deposits.filter((x) => {
+        const t = Date.parse(x.date);
+        return Number.isFinite(t) && t < closeMs && Number.isFinite(x.usd);
+      });
+      depositCount = rows.length;
+      depositsUsd = r2(rows.reduce((s, x) => s + x.usd, 0));
+    }
+
+    let groupUsageUsd = null;
+    try {
+      let sum = 0;
+      let any = false;
+      for (const w of loadRegistry().wallets) {
+        const s = snapshotAtOrBefore(readLedger(w).snapshots, closeMs);
+        if (Number.isFinite(s?.llm_usd_lifetime)) {
+          sum += s.llm_usd_lifetime;
+          any = true;
+        }
+      }
+      if (any) groupUsageUsd = r2(sum);
+    } catch {
+      // tanpa registry → laporan wallet tunggal; split grup dilewati
+    }
+
+    return {
+      total_credits_usd: r2(credits.total_credits_usd),
+      total_usage_usd: r2(credits.total_usage_usd),
+      balance_usd: r2(credits.total_credits_usd - credits.total_usage_usd),
+      deposits_usd: depositsUsd,
+      deposit_count: depositCount,
+      group_usage_usd: groupUsageUsd,
+    };
+  } catch {
+    return null; // memo — tidak pernah menjatuhkan laporan
+  }
+}
+
+function kasLlmLines(record) {
+  const m = llmCreditsMemo(record);
+  if (!m) return [];
+  const L = (label, v) => `${label.padEnd(20)}${fmtUsd(v).padStart(10)}`;
+  const lines = ["", "KAS LLM (USD · memo)"];
+  if (m.deposits_usd != null) lines.push(L(`Deposit (${m.deposit_count}×)`, m.deposits_usd));
+  lines.push(L("Terpakai semua key", -m.total_usage_usd));
+  if (m.group_usage_usd != null) {
+    const outside = r2(Math.max(0, m.total_usage_usd - m.group_usage_usd));
+    lines.push(`  kunci grup        ${fmtUsd(-m.group_usage_usd).padStart(10)}`);
+    lines.push(`  di luar grup      ${fmtUsd(-outside).padStart(10)}`);
+  }
+  lines.push(L("Sisa kredit", m.balance_usd));
+  if (m.deposits_usd != null && Math.abs(m.deposits_usd - m.total_credits_usd) > 0.005) {
+    lines.push(`  ⚠️ Σ deposit tercatat ${fmtUsd(m.deposits_usd)} ≠ total akun ${fmtUsd(m.total_credits_usd)} — perbarui llm-deposits.json`);
+  }
+  return lines;
+}
 const stampOf = (iso) => String(iso).slice(0, 16).replace("T", " ");
 
 function periodTitle(record) {
@@ -424,6 +516,7 @@ export function formatFinancialReport({ wallet, record, ytd = null }, { html = f
       ? row("LLM (OpenRouter)", p.llm_cost_sol, p.llm_cost_usd)
       : `${"LLM (OpenRouter)".padEnd(20)}${"n/a".padStart(10)}`,
     row("NET RILL", p.net_rill_sol),
+    ...kasLlmLines(record),
     "",
     "EKUITAS (SOL)",
     eqRow("Saldo awal", e.saldo_awal_sol),

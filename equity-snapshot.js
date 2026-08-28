@@ -32,6 +32,7 @@ import {
   fetchBalance,
   fetchSolPrice,
   fetchLlmUsage,
+  fetchLlmCredits,
 } from "./utils/chain-flows.js";
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -234,6 +235,7 @@ export function buildWindowSnapshot({
   solPrice = null,
   llmUsdLifetime = null,
   llmKeyIdVal = null,
+  llmCredits = null, // {total_credits_usd, total_usage_usd} level AKUN — memo kas prabayar
   prevSaldoBebasSol = null,
   driftToleranceSol = 0.001,
   overlapSec = 1800,
@@ -305,6 +307,7 @@ export function buildWindowSnapshot({
     sol_price: solPrice,
     llm_usd_lifetime: llmUsdLifetime,
     llm_key_id: llmKeyIdVal,
+    llm_credits: llmCredits,
     integrity: {
       delta_balance_sol: deltaBalanceSol,
       flow_sum_sol: flowSumSol,
@@ -351,6 +354,7 @@ export async function takeSnapshot({ now = Date.now() } = {}) {
   const perf = readPerformanceEntries();
   const solPrice = await fetchSolPrice().catch(() => null); // memo only — never fatal
   const llmUsd = await fetchLlmUsage();
+  const llmCredits = await fetchLlmCredits(); // kas akun (§14) — memo, gagal = null
   const keyId = llmKeyId();
   const prev = store.snapshots.length ? store.snapshots[store.snapshots.length - 1] : null;
 
@@ -388,6 +392,7 @@ export async function takeSnapshot({ now = Date.now() } = {}) {
       bookEntries: [],
       solPrice,
       llmUsdLifetime: llmUsd,
+      llmCredits,
       trustedOverride: true, // nothing to cross-check yet — the chain starts here
     });
     store.snapshots.push(entry);
@@ -458,6 +463,7 @@ export async function takeSnapshot({ now = Date.now() } = {}) {
       bookEntries: bookEntriesIn(perf, boundaryMs - DAY_MS, boundaryMs),
       solPrice: isToday ? solPrice : null, // derived entries are SOL-native only
       llmUsdLifetime: isToday ? llmUsd : null,
+      llmCredits: isToday ? llmCredits : null, // saldo kredit historis tak terpulihkan
       prevSaldoBebasSol: prevSaldo,
       walkReachedCutoff: walk.reachedCutoff,
       trustedOverride: isToday ? null : false,

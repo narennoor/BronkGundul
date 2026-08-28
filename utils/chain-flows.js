@@ -129,6 +129,27 @@ export async function fetchLlmUsage() {
   }
 }
 
+/**
+ * Kas prabayar OpenRouter level AKUN (bukan per key): total kredit yang pernah
+ * dibeli + total terpakai SEMUA key akun itu — terbaca dengan key inference
+ * biasa (dibuktikan 28 Agu 2026). Memo untuk blok KAS LLM di laporan; gagal =
+ * null, tidak pernah fatal — pola yang sama dengan fetchLlmUsage.
+ */
+export async function fetchLlmCredits() {
+  const key = process.env.OPENROUTER_API_KEY || process.env.LLM_API_KEY;
+  if (!key) return null;
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/credits", {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    const d = (await res.json())?.data;
+    if (!Number.isFinite(d?.total_credits) || !Number.isFinite(d?.total_usage)) return null;
+    return { total_credits_usd: d.total_credits, total_usage_usd: d.total_usage };
+  } catch {
+    return null;
+  }
+}
+
 export function walletChange(tx, wallet) {
   const entry = (tx.accountData || []).find((a) => a.account === wallet);
   return entry ? entry.nativeBalanceChange / 1e9 : 0;

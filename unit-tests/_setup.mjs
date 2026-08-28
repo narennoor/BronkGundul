@@ -81,6 +81,14 @@ if (REGISTRY_PATH === path.join(os.homedir(), ".meridian", "ledger-registry.json
   );
 }
 
+// Berkas deposit LLM operator (financial-report.js llmCreditsMemo) — di luar
+// repoPath() juga; default produksinya bersebelahan dengan registry.
+if (!process.env.MERIDIAN_LLM_DEPOSITS_PATH) {
+  process.env.MERIDIAN_LLM_DEPOSITS_PATH = path.join(STATE_DIR, "llm-deposits.json");
+}
+
+export const LLM_DEPOSITS_PATH = path.resolve(process.env.MERIDIAN_LLM_DEPOSITS_PATH);
+
 if (created) {
   process.on("exit", () => {
     try { fs.rmSync(STATE_DIR, { recursive: true, force: true }); } catch { /* temp dir, best effort */ }
