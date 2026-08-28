@@ -43,7 +43,7 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
-import { notifyDeploy, notifyClose, notifySwap, sendMessage } from "../telegram.js";
+import { notifyDeploy, notifyClose, notifySwap, sendMessage, TOPICS } from "../telegram.js";
 import { writeJsonAtomic } from "../utils/json-store.js";
 
 function numberOrNull(value) {
@@ -842,7 +842,7 @@ export async function sweepLeftoverTokens() {
       } else {
         // Stays in _sweepSeen — retried next management cycle. Alert so a stuck
         // token is no longer log-only (the pendu failure mode).
-        sendMessage(`⚠️ Sweep failed: ${token.symbol} ($${Number(token.usd).toFixed(2)}) is still in the wallet with no open position — will retry next cycle. Check logs.`).catch(() => {});
+        sendMessage(`⚠️ Sweep failed: ${token.symbol} ($${Number(token.usd).toFixed(2)}) is still in the wallet with no open position — will retry next cycle. Check logs.`, { thread: TOPICS.activity }).catch(() => {});
       }
     }
     return { swept };

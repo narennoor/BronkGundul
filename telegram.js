@@ -14,6 +14,35 @@ const ALLOWED_USER_IDS = new Set(
     .filter(Boolean)
 );
 
+// ─── Forum-topic routing ─────────────────────────────────────────
+// In a group with Topics enabled every send can target a topic via
+// message_thread_id. Cycle activity and cron reports get fixed topics from
+// .env (TELEGRAM_TOPIC_ACTIVITY / TELEGRAM_TOPIC_REPORT); command replies
+// echo into the topic the command was typed in (setReplyThread, set per
+// incoming message). Anything unset/null lands in the General topic — and in
+// a plain private/group chat no thread is ever attached, so behavior there
+// is unchanged.
+function parseTopicId(value) {
+  const n = Number.parseInt(String(value ?? "").trim(), 10);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+export const TOPICS = {
+  activity: parseTopicId(process.env.TELEGRAM_TOPIC_ACTIVITY),
+  report: parseTopicId(process.env.TELEGRAM_TOPIC_REPORT),
+};
+let _replyThreadId = null;
+export function setReplyThread(threadId) {
+  _replyThreadId = parseTopicId(threadId);
+}
+// Only these methods accept message_thread_id; edits and callback answers
+// target a message_id and need no thread.
+const THREAD_METHODS = new Set(["sendMessage", "sendChatAction"]);
+// undefined = caller didn't choose → follow the reply context; explicit
+// null = force General; a number = that topic.
+function resolveThread(thread) {
+  return thread !== undefined ? thread : _replyThreadId;
+}
+
 let chatId = null;
 let _offset  = 0;
 let _polling = false;
@@ -124,13 +153,16 @@ export function isEnabled() {
   return !!TOKEN;
 }
 
-async function postTelegram(method, body) {
+async function postTelegram(method, body, thread) {
   if (!TOKEN || !chatId) return null;
+  const threadId = resolveThread(thread);
+  const payload = { chat_id: chatId, ...body };
+  if (threadId != null && THREAD_METHODS.has(method)) payload.message_thread_id = threadId;
   try {
     const res = await tgFetch(`${BASE}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, ...body }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const err = await res.text();
@@ -172,9 +204,9 @@ async function postTelegramRaw(method, body) {
   }
 }
 
-export async function sendMessage(text) {
+export async function sendMessage(text, { thread } = {}) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: String(text).slice(0, 4096) });
+  return postTelegram("sendMessage", { text: String(text).slice(0, 4096) }, thread);
 }
 
 // ─── Markdown → Telegram HTML ────────────────────────────────────
@@ -204,36 +236,36 @@ export function markdownToTelegramHtml(text) {
 }
 
 /** Send markdown-ish LLM output as formatted HTML; falls back to plain text on parse failure. */
-export async function sendMarkdown(text) {
+export async function sendMarkdown(text, { thread } = {}) {
   if (!TOKEN || !chatId) return;
   const plain = String(text).slice(0, 4096);
   const html = markdownToTelegramHtml(plain);
   if (html.length <= 4096) {
-    const sent = await postTelegram("sendMessage", { text: html, parse_mode: "HTML" });
+    const sent = await postTelegram("sendMessage", { text: html, parse_mode: "HTML" }, thread);
     if (sent) return sent;
   }
-  return postTelegram("sendMessage", { text: plain });
+  return postTelegram("sendMessage", { text: plain }, thread);
 }
 
-export async function sendMessageWithButtons(text, inlineKeyboard) {
+export async function sendMessageWithButtons(text, inlineKeyboard, { thread } = {}) {
   if (!TOKEN || !chatId) return;
   return postTelegram("sendMessage", {
     text: String(text).slice(0, 4096),
     reply_markup: { inline_keyboard: inlineKeyboard },
-  });
+  }, thread);
 }
 
-export async function sendHTML(html) {
+export async function sendHTML(html, { thread } = {}) {
   if (!TOKEN || !chatId) return;
   const text = String(html).slice(0, 4096);
-  const sent = await postTelegram("sendMessage", { text, parse_mode: "HTML" });
+  const sent = await postTelegram("sendMessage", { text, parse_mode: "HTML" }, thread);
   if (sent) return sent;
   // Parse failure (unescaped < in dynamic text, etc.) — degrade to plain text
   // instead of dropping the message entirely.
   const plain = text
     .replace(/<[^>]*>/g, "")
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-  return postTelegram("sendMessage", { text: plain });
+  return postTelegram("sendMessage", { text: plain }, thread);
 }
 
 // MIME per ekstensi untuk sendDocument — Telegram menyimpan tipe ini dan
@@ -252,13 +284,15 @@ const DOCUMENT_MIME = {
  * Returns the API result or null; a failed document must never take the text
  * report down with it, so this never throws.
  */
-export async function sendDocument(buffer, filename, caption = "") {
+export async function sendDocument(buffer, filename, caption = "", { thread } = {}) {
   if (!TOKEN || !chatId) return null;
   try {
     const ext = String(filename).toLowerCase().match(/\.[a-z0-9]+$/)?.[0];
     const type = DOCUMENT_MIME[ext] ?? "application/octet-stream";
     const form = new FormData();
     form.append("chat_id", String(chatId));
+    const threadId = resolveThread(thread);
+    if (threadId != null) form.append("message_thread_id", String(threadId));
     if (caption) form.append("caption", String(caption).slice(0, 1024));
     form.append("document", new Blob([buffer], { type }), String(filename));
     const res = await tgFetch(`${BASE}/sendDocument`, { method: "POST", body: form });
@@ -303,7 +337,7 @@ export function hasActiveLiveMessage() {
   return _liveMessageDepth > 0;
 }
 
-function createTypingIndicator() {
+function createTypingIndicator(thread) {
   if (!TOKEN || !chatId) {
     return { stop() {} };
   }
@@ -313,7 +347,7 @@ function createTypingIndicator() {
 
   async function tick() {
     if (stopped) return;
-    await postTelegram("sendChatAction", { action: "typing" });
+    await postTelegram("sendChatAction", { action: "typing" }, thread);
     timer = setTimeout(() => {
       tick().catch(() => null);
     }, 4000);
@@ -381,9 +415,12 @@ function summarizeToolResult(name, result) {
   }
 }
 
-export async function createLiveMessage(title, intro = "Starting...") {
+export async function createLiveMessage(title, intro = "Starting...", { thread } = {}) {
   if (!TOKEN || !chatId) return null;
-  const typing = createTypingIndicator();
+  // Resolve once at creation: a live message follows one topic for its whole
+  // lifetime, even when the reply context moves on mid-cycle.
+  const threadId = resolveThread(thread);
+  const typing = createTypingIndicator(threadId);
 
   const state = {
     title,
@@ -412,9 +449,9 @@ export async function createLiveMessage(title, intro = "Starting...") {
     const formatted = html.length <= 4096 ? html : null;
     if (!state.messageId) {
       let sent = formatted
-        ? await postTelegram("sendMessage", { text: formatted, parse_mode: "HTML" })
+        ? await postTelegram("sendMessage", { text: formatted, parse_mode: "HTML" }, threadId)
         : null;
-      if (!sent) sent = await sendMessage(text);
+      if (!sent) sent = await sendMessage(text, { thread: threadId });
       state.messageId = sent?.result?.message_id ?? null;
       return;
     }
@@ -503,6 +540,7 @@ async function poll(onMessage) {
             chat: callback.message.chat,
             from: callback.from,
             text: callback.data,
+            message_thread_id: callback.message.message_thread_id,
           };
           if (!isAuthorizedIncomingMessage(callbackMsg)) continue;
           await onMessage({
@@ -601,7 +639,8 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
     coverageStr +
     poolStr +
     `Position: <code>${position?.slice(0, 8)}...</code>\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+    `Tx: <code>${tx?.slice(0, 16)}...</code>`,
+    { thread: TOPICS.activity }
   );
 }
 
@@ -610,7 +649,8 @@ export async function notifyClose({ pair, pnlUsd, pnlPct }) {
   const sign = pnlUsd >= 0 ? "+" : "";
   await sendHTML(
     `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
+    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`,
+    { thread: TOPICS.activity }
   );
 }
 
@@ -619,7 +659,8 @@ export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOu
   await sendHTML(
     `🔄 <b>Swapped</b> ${inputSymbol} → ${outputSymbol}\n` +
     `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+    `Tx: <code>${tx?.slice(0, 16)}...</code>`,
+    { thread: TOPICS.activity }
   );
 }
 
@@ -627,7 +668,8 @@ export async function notifyOutOfRange({ pair, minutesOOR }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
     `⚠️ <b>Out of Range</b> ${pair}\n` +
-    `Been OOR for ${minutesOOR} minutes`
+    `Been OOR for ${minutesOOR} minutes`,
+    { thread: TOPICS.activity }
   );
 }
 

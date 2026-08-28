@@ -26,6 +26,8 @@ import {
   notifyOutOfRange,
   isEnabled as telegramEnabled,
   createLiveMessage,
+  TOPICS,
+  setReplyThread,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { takeSnapshot, healGap, loadSnapshots, ledgerWalletAddress } from "./equity-snapshot.js";
@@ -130,7 +132,7 @@ async function runBriefing() {
   try {
     const briefing = await generateBriefing();
     if (telegramEnabled()) {
-      await sendHTML(briefing);
+      await sendHTML(briefing, { thread: null }); // cron: always General, ignore reply context
     }
     setLastBriefingDate();
   } catch (error) {
@@ -212,22 +214,22 @@ async function maybeRunMissedSnapshot() {
  * already exists, and the next report rebuilds the workbook from the ledger
  * anyway.
  */
-async function sendReportAttachments(record) {
+async function sendReportAttachments(record, { thread } = {}) {
   if (!config.report.csvEnabled || !telegramEnabled()) return;
   try {
     for (const f of buildReportXlsx(record, { wallet: ledgerWalletAddress() })) {
-      await sendDocument(f.buffer, f.filename, f.caption);
+      await sendDocument(f.buffer, f.filename, f.caption, { thread });
     }
   } catch (e) {
     log("cron_error", `Lampiran laporan ${record.kind} ${record.id} gagal: ${e.message}`);
   }
 }
 
-async function sendGroupReportAttachments(groupRecord) {
+async function sendGroupReportAttachments(groupRecord, { thread } = {}) {
   if (!config.report.csvEnabled || !telegramEnabled()) return;
   try {
     for (const f of buildGroupReportXlsx(groupRecord)) {
-      await sendDocument(f.buffer, f.filename, f.caption);
+      await sendDocument(f.buffer, f.filename, f.caption, { thread });
     }
   } catch (e) {
     log("cron_error", `Lampiran grup ${groupRecord.kind} ${groupRecord.id} gagal: ${e.message}`);
@@ -304,13 +306,13 @@ async function runPeriodReport(kind, { onlyIfUnsealed = false } = {}) {
     }
     if (group) {
       const msg = formatFinancialReport({ wallet: group.group_name ?? "", record: group, ytd }, { html: true });
-      if (telegramEnabled()) await sendHTML(msg);
-      await sendGroupReportAttachments(group);
+      if (telegramEnabled()) await sendHTML(msg, { thread: TOPICS.report });
+      await sendGroupReportAttachments(group, { thread: TOPICS.report });
       log("cron", `Laporan GRUP ${kind} ${id} terkirim — complete=${group.integrity.complete}, integrity_ok=${group.integrity.integrity_ok}`);
     } else {
       const msg = formatFinancialReport({ wallet: ledgerWalletAddress(), record, ytd }, { html: true });
-      if (telegramEnabled()) await sendHTML(msg);
-      await sendReportAttachments(record);
+      if (telegramEnabled()) await sendHTML(msg, { thread: TOPICS.report });
+      await sendReportAttachments(record, { thread: TOPICS.report });
       log("cron", `Laporan ${kind} ${id} ${sealedNow ? "disegel & " : ""}terkirim — integrity_ok=${record.integrity.integrity_ok}`);
     }
   } catch (error) {
@@ -423,7 +425,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
   try {
     if (!silent && telegramEnabled()) {
-      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
+      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...", { thread: TOPICS.activity });
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
@@ -549,7 +551,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMarkdown(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        else sendMarkdown(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`, { thread: TOPICS.activity }).catch(() => { });
       }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
@@ -649,7 +651,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
   }
   _lastScreeningSkipReason = null; // guards passed — next skip streak logs fresh
   if (!silent && telegramEnabled()) {
-    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...");
+    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...", { thread: TOPICS.activity });
   }
   timers.screeningLastRun = Date.now();
   log("cron", `Starting screening cycle [model: ${config.llm.screeningModel}]`);
@@ -951,7 +953,7 @@ IMPORTANT:
     if (!silent && telegramEnabled()) {
       if (screenReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMarkdown(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        else sendMarkdown(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`, { thread: TOPICS.activity }).catch(() => { });
       }
     }
   }
@@ -1794,6 +1796,9 @@ async function drainTelegramQueue() {
 async function telegramHandler(msg) {
   const text = msg?.text?.trim();
   if (!text) return;
+  // Echo replies into the topic the command was typed in (General = none).
+  // Set per message, incl. when re-entered from the queue drain.
+  setReplyThread(msg?.message_thread_id);
   if (msg?.isCallback && text.startsWith("cfg:")) {
     try {
       await applySettingsMenuCallback(msg);
