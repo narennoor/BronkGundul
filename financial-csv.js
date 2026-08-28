@@ -24,7 +24,11 @@ import {
   loadPeriods,
   loadSnapshots,
   readPerformanceEntries,
+  ledgerWalletAddress,
 } from "./equity-snapshot.js";
+import { loadRegistry, walletsActiveIn } from "./ledger-registry.js";
+import { readLedger } from "./ledger-transport.js";
+import { consolidatePeriod } from "./consolidate.js";
 
 const BOM = "\uFEFF";
 const EOL = "\r\n"; // Excel Windows
@@ -70,32 +74,47 @@ export const PERIODS_CSV_COLUMNS = [
   "closes", "win_rate_pct", "sol_price_close", "integrity_ok", "cum_drift_sol", "sealed_at",
 ];
 
+// Satu baris §09 dari satu record periode (seal wallet ATAU record grup dari
+// consolidatePeriod — bentuknya sama; record grup punya internal_eliminated_sol
+// terisi dan sealed_at kosong karena record grup tidak pernah disegel).
+function periodCsvRow(r, scope, walletId) {
+  const winRate = r.pnl.closes > 0 ? (r.pnl.wins / r.pnl.closes) * 100 : null;
+  return [
+    r.id, r.kind, isoc(r.from), isoc(r.to), scope, walletId,
+    sol4(r.pnl.fee_lp_sol), sol4(r.pnl.impermanent_loss_sol), sol4(r.pnl.net_revenue_sol),
+    sol4(r.pnl.exec_cost_sol), sol4(r.pnl.exec_cost_measured_sol), sol4(r.pnl.gas_fee_sol), sol4(r.pnl.gross_rill_sol),
+    sol4(r.pnl.llm_cost_sol), usd2(r.pnl.llm_cost_usd), sol4(r.pnl.net_rill_sol),
+    sol4(r.equity.saldo_awal_sol), sol4(r.equity.deposit_sol), sol4(r.equity.withdrawal_sol),
+    sol4(r.equity.internal_eliminated_sol), sol4(r.equity.modal_dasar_sol),
+    sol4(r.equity.saldo_bebas_sol), sol4(r.equity.modal_posisi_sol), sol4(r.equity.modal_posisi_rent_sol),
+    sol4(r.equity.total_ekuitas_sol),
+    sol4(r.equity.laba_kumulatif_sol), sol4(r.equity.unrealized_pnl_sol), boolc(r.equity.unrealized_suspect),
+    pct2(r.roi.dietz_pct), pct2(r.roi.twr_pct),
+    intc(r.pnl.closes), pct2(winRate), usd2(r.sol_price_close),
+    boolc(r.integrity.integrity_ok), sol4(r.integrity.cum_drift_sol), isoc(r.sealed_at),
+  ];
+}
+
 /**
  * Satu baris per periode TERSEGEL (week/month/year — YTD tidak pernah masuk,
  * dia belum disegel). `scope` membuat baris grup dan per-wallet hidup di satu
  * berkas: fase 4 hanya menulis WALLET; konsolidasi fase 5 menambah baris GROUP
- * lebih dulu untuk period_id yang sama. internal_eliminated_sol hanya bermakna
- * di level grup → kosong pada baris WALLET.
+ * lebih dulu untuk period_id yang sama (toGroupPeriodsCsv).
+ * internal_eliminated_sol hanya bermakna di level grup → kosong pada baris
+ * WALLET.
  */
 export function toPeriodsCsv(periods, { walletId, scope = "WALLET" } = {}) {
-  const rows = periods.map((r) => {
-    const winRate = r.pnl.closes > 0 ? (r.pnl.wins / r.pnl.closes) * 100 : null;
-    return [
-      r.id, r.kind, isoc(r.from), isoc(r.to), scope, walletId,
-      sol4(r.pnl.fee_lp_sol), sol4(r.pnl.impermanent_loss_sol), sol4(r.pnl.net_revenue_sol),
-      sol4(r.pnl.exec_cost_sol), sol4(r.pnl.exec_cost_measured_sol), sol4(r.pnl.gas_fee_sol), sol4(r.pnl.gross_rill_sol),
-      sol4(r.pnl.llm_cost_sol), usd2(r.pnl.llm_cost_usd), sol4(r.pnl.net_rill_sol),
-      sol4(r.equity.saldo_awal_sol), sol4(r.equity.deposit_sol), sol4(r.equity.withdrawal_sol),
-      sol4(r.equity.internal_eliminated_sol), sol4(r.equity.modal_dasar_sol),
-      sol4(r.equity.saldo_bebas_sol), sol4(r.equity.modal_posisi_sol), sol4(r.equity.modal_posisi_rent_sol),
-      sol4(r.equity.total_ekuitas_sol),
-      sol4(r.equity.laba_kumulatif_sol), sol4(r.equity.unrealized_pnl_sol), boolc(r.equity.unrealized_suspect),
-      pct2(r.roi.dietz_pct), pct2(r.roi.twr_pct),
-      intc(r.pnl.closes), pct2(winRate), usd2(r.sol_price_close),
-      boolc(r.integrity.integrity_ok), sol4(r.integrity.cum_drift_sol), isoc(r.sealed_at),
-    ];
-  });
-  return toCsvBuffer(PERIODS_CSV_COLUMNS, rows);
+  return toCsvBuffer(PERIODS_CSV_COLUMNS, periods.map((r) => periodCsvRow(r, scope, walletId)));
+}
+
+/**
+ * Versi grup dari berkas yang SAMA (§09): items = [{ record, scope, walletId }]
+ * sudah terurut oleh pemanggil — baris GROUP lebih dulu, lalu WALLET per
+ * wallet untuk period_id yang sama. wallet_id kosong pada baris GROUP (tidak
+ * berlaku ≠ nol).
+ */
+export function toGroupPeriodsCsv(items) {
+  return toCsvBuffer(PERIODS_CSV_COLUMNS, items.map(({ record, scope, walletId }) => periodCsvRow(record, scope, walletId ?? "")));
 }
 
 // ─── meridian_closes_<period_id>.csv ─────────────────────────────────
@@ -149,21 +168,38 @@ export const CURVE_CSV_COLUMNS = [
  * kosong pada entri derived — harga historis tidak bisa dipulihkan, dan kosong
  * ≠ nol.
  */
-export function toCurveCsv(snapshots, { granularity, from, to, walletId } = {}) {
+function curveRows(snapshots, { granularity, from, to, walletId }) {
   if (granularity !== "day" && granularity !== "week") {
     throw new Error(`granularity "${granularity}" tidak dikenal — day | week`);
   }
-  const points = snapshots.filter((s) => {
-    const b = Date.parse(s.boundary_ts);
-    if (b < from || b > to) return false;
-    if (granularity === "day") return true;
-    return new Date(b).getUTCDay() === 1 || b === from || b === to;
-  });
-  const rows = points.map((s) => [
-    isoc(s.boundary_ts), walletId,
-    sol4(s.equity.saldo_bebas_sol), sol4(s.equity.modal_posisi_sol), sol4(s.equity.total_sol),
-    usd2(s.sol_price), s.source ?? "", boolc(s.integrity?.trusted),
-  ]);
+  return snapshots
+    .filter((s) => {
+      const b = Date.parse(s.boundary_ts);
+      if (b < from || b > to) return false;
+      if (granularity === "day") return true;
+      return new Date(b).getUTCDay() === 1 || b === from || b === to;
+    })
+    .map((s) => [
+      isoc(s.boundary_ts), walletId,
+      sol4(s.equity.saldo_bebas_sol), sol4(s.equity.modal_posisi_sol), sol4(s.equity.total_sol),
+      usd2(s.sol_price), s.source ?? "", boolc(s.integrity?.trusted),
+    ]);
+}
+
+export function toCurveCsv(snapshots, { granularity, from, to, walletId } = {}) {
+  return toCsvBuffer(CURVE_CSV_COLUMNS, curveRows(snapshots, { granularity, from, to, walletId }));
+}
+
+/**
+ * Kurva grup: baris per WALLET per titik (§09 — "52-an baris per wallet"),
+ * tanpa baris agregat sintetis: menjumlahkan tanggal yang snapshotnya bolong
+ * di salah satu wallet akan menggambar dip palsu; pivot-sum di Excel bila
+ * perlu total. series = [{ walletId, snapshots }].
+ */
+export function toGroupCurveCsv(series, { granularity, from, to } = {}) {
+  const rows = series.flatMap(({ walletId, snapshots }) =>
+    curveRows(snapshots, { granularity, from, to, walletId }),
+  );
   return toCsvBuffer(CURVE_CSV_COLUMNS, rows);
 }
 
@@ -216,6 +252,95 @@ export function buildReportCsvs(record, { wallet }) {
       filename: `meridian_curve_${record.id}.csv`,
       buffer: toCurveCsv(snapshots, { granularity, from, to, walletId: wallet }),
       caption: `Kurva ekuitas ${granularity === "day" ? "harian" : "mingguan"} · ${record.id}`,
+    });
+  }
+  return files;
+}
+
+/**
+ * Lampiran §09 versi GRUP (fase 5) — dikirim primary setelah laporan grup:
+ *
+ *   meridian_periods.csv        baris GROUP lebih dulu lalu WALLET per wallet,
+ *                               untuk UNION semua (kind, id) tersegel di
+ *                               registry; baris GROUP dihitung ulang lewat
+ *                               consolidatePeriod (deterministik, nol network,
+ *                               record grup memang tidak pernah disegel)
+ *   meridian_closes_<id>.csv    tetap posisi wallet SENDIRI — detail close
+ *                               hidup di lessons.json per daemon dan tidak
+ *                               diangkut transport ledger (hanya snapshots +
+ *                               periods), jadi baris wallet lain tidak bisa
+ *                               jujur dibuat di sini
+ *   meridian_curve_<id>.csv     baris per wallet dari ledger masing-masing
+ *
+ * Murni berkas lokal — nol Helius, nol RPC. Konsolidasi satu periode yang
+ * gagal (mis. ledger salah satu wallet belum ada saat itu) melewati baris
+ * GROUP-nya saja; baris WALLET tetap ditulis.
+ */
+export function buildGroupReportCsvs(groupRecord) {
+  const registry = loadRegistry();
+  const ledgers = registry.wallets.map((w) => ({ w, ...readLedger(w) }));
+
+  // union (kind, id) dari semua wallet, terurut (from, kind) seperti loadPeriods
+  const byKey = new Map();
+  for (const { w, periods } of ledgers) {
+    for (const p of periods) {
+      const key = `${p.kind}:${p.id}`;
+      if (!byKey.has(key)) byKey.set(key, { kind: p.kind, id: p.id, from: p.from, seals: [] });
+      byKey.get(key).seals.push({ walletId: w.id, record: p });
+    }
+  }
+  const keys = [...byKey.values()].sort((a, b) =>
+    a.from < b.from ? -1 : a.from > b.from ? 1 : a.kind.localeCompare(b.kind),
+  );
+  const items = [];
+  for (const k of keys) {
+    try {
+      items.push({ record: consolidatePeriod({ kind: k.kind, id: k.id, registry }), scope: "GROUP", walletId: "" });
+    } catch {
+      // baris GROUP dilewati — baris WALLET di bawah tetap menceritakan datanya
+    }
+    for (const { w } of ledgers) {
+      const seal = k.seals.find((s) => s.walletId === w.id);
+      if (seal) items.push({ record: seal.record, scope: "WALLET", walletId: w.id });
+    }
+  }
+  const files = [
+    {
+      filename: "meridian_periods.csv",
+      buffer: toGroupPeriodsCsv(items),
+      caption: `Semua periode tersegel — ${items.length} baris GROUP+WALLET (filter kolom scope/kind di Excel)`,
+    },
+  ];
+
+  const from = Date.parse(groupRecord.from);
+  const to = Date.parse(groupRecord.to);
+
+  if (groupRecord.kind !== "ytd") {
+    const own = ledgerWalletAddress();
+    const ownId = registry.wallets.find((w) => w.address === own)?.id ?? own;
+    const entries = closesInWindow(readPerformanceEntries(), from, to);
+    files.push({
+      filename: `meridian_closes_${groupRecord.id}.csv`,
+      buffer: toClosesCsv(entries, { walletId: ownId }),
+      caption: `Detail ${entries.length} posisi tertutup (wallet ${ownId}) · ${groupRecord.id}`,
+    });
+  }
+
+  const gran = config.report.curveGranularity ?? {};
+  const granularity =
+    groupRecord.kind === "month" ? (gran.month ?? "day")
+    : groupRecord.kind === "year" ? (gran.year ?? "week")
+    : groupRecord.kind === "ytd" ? (gran.ytd ?? "week")
+    : null;
+  if (granularity) {
+    const series = walletsActiveIn(from, to, registry).map((w) => ({
+      walletId: w.id,
+      snapshots: ledgers.find((l) => l.w.id === w.id)?.snapshots ?? [],
+    }));
+    files.push({
+      filename: `meridian_curve_${groupRecord.id}.csv`,
+      buffer: toGroupCurveCsv(series, { granularity, from, to }),
+      caption: `Kurva ekuitas ${granularity === "day" ? "harian" : "mingguan"} per wallet · ${groupRecord.id}`,
     });
   }
   return files;

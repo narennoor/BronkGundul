@@ -416,6 +416,10 @@ export const config = {
     // the unit-test suite.
     ledgerDir: nonEmptyString(u.reportLedgerDir, "~/.meridian/ledger"),
     registryPath: nonEmptyString(u.reportRegistryPath, "~/.meridian/ledger-registry.json"),
+    // Fase 5 (§08): level grup memakai SATU harga SOL per boundary — harga
+    // dari wallet primary; angka utama grup SOL-native, USD tetap turunan.
+    // "primary" adalah satu-satunya sumber yang diimplementasikan.
+    groupPriceSource: nonEmptyString(u.reportGroupPriceSource, "primary"),
     // Incremental walk overlap (minutes) behind the previous snapshot's
     // boundary — catches late-indexed txs; deduped by signature so it's free.
     walkOverlapMin: Number(u.reportWalkOverlapMin ?? 30),

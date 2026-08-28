@@ -287,6 +287,7 @@ function normalizeConfigValue(key, value) {
     "reportCurveGranularityMonth",
     "reportCurveGranularityYear",
     "reportCurveGranularityYtd",
+    "reportGroupPriceSource",
   ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
@@ -299,6 +300,10 @@ function normalizeConfigValue(key, value) {
     if (key === "pnlReportSinceIso" && str) resolveReportCutoff(str);
     if (key.startsWith("reportCurveGranularity") && str !== "day" && str !== "week") {
       throw new Error(`${key} must be "day" or "week"`);
+    }
+    // §08: satu-satunya sumber harga grup yang diimplementasikan.
+    if (key === "reportGroupPriceSource" && str !== "primary") {
+      throw new Error(`${key} must be "primary" (satu-satunya sumber yang diimplementasikan)`);
     }
     return str;
   }
@@ -593,6 +598,7 @@ const toolMap = {
       reportCurveGranularityMonth: ["report", ["curveGranularity", "month"]],
       reportCurveGranularityYear: ["report", ["curveGranularity", "year"]],
       reportCurveGranularityYtd: ["report", ["curveGranularity", "ytd"]],
+      reportGroupPriceSource: ["report", "groupPriceSource"],
     };
 
     const applied = {};

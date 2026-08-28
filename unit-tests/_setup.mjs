@@ -66,6 +66,21 @@ export function ledgerPath(...segments) {
   return path.join(LEDGER_DIR, ...segments);
 }
 
+// Registry konsolidasi (ledger-registry.js) juga hidup di luar repoPath() —
+// isolasi yang sama dengan ledger di atas.
+if (!process.env.MERIDIAN_REGISTRY_PATH) {
+  process.env.MERIDIAN_REGISTRY_PATH = path.join(STATE_DIR, "ledger-registry.json");
+}
+
+export const REGISTRY_PATH = path.resolve(process.env.MERIDIAN_REGISTRY_PATH);
+
+if (REGISTRY_PATH === path.join(os.homedir(), ".meridian", "ledger-registry.json")) {
+  throw new Error(
+    "unit-tests/_setup.mjs: MERIDIAN_REGISTRY_PATH menunjuk registry sungguhan " +
+    "(~/.meridian/ledger-registry.json) — unset atau arahkan ke berkas scratch.",
+  );
+}
+
 if (created) {
   process.on("exit", () => {
     try { fs.rmSync(STATE_DIR, { recursive: true, force: true }); } catch { /* temp dir, best effort */ }

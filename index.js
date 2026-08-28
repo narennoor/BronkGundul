@@ -30,7 +30,10 @@ import {
 import { generateBriefing } from "./briefing.js";
 import { takeSnapshot, healGap, loadSnapshots, ledgerWalletAddress } from "./equity-snapshot.js";
 import { ensurePeriodSealed, formatFinancialReport, buildYtdReport, lastClosedPeriodId, periodBounds } from "./financial-report.js";
-import { buildReportCsvs } from "./financial-csv.js";
+import { buildReportCsvs, buildGroupReportCsvs } from "./financial-csv.js";
+import { consolidatePeriod } from "./consolidate.js";
+import { loadRegistry, resolveRegistryPath } from "./ledger-registry.js";
+import { readLedger } from "./ledger-transport.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
@@ -218,11 +221,51 @@ async function sendReportCsvs(record) {
   }
 }
 
+async function sendGroupReportCsvs(groupRecord) {
+  if (!config.report.csvEnabled || !telegramEnabled()) return;
+  try {
+    for (const f of buildGroupReportCsvs(groupRecord)) {
+      await sendDocument(f.buffer, f.filename, f.caption);
+    }
+  } catch (e) {
+    log("cron_error", `CSV grup ${groupRecord.kind} ${groupRecord.id} gagal: ${e.message}`);
+  }
+}
+
 /**
- * Seal the just-closed period and send its report (fase 2: week + month).
- * Sealing is pure arithmetic over the ledger files — zero Helius. With
- * `onlyIfUnsealed` (watchdog path) an already-sealed period sends nothing, so
- * a report can never go out twice.
+ * Fase 5: the group record for {kind, id}, or null when consolidation is not
+ * possible (no registry yet, unreadable ledger) — the caller then falls back
+ * to the single-wallet report, so a deployment without a registry keeps
+ * working exactly as fase 2 did. Warns once per process when this daemon says
+ * primary but the registry crowns a different address — the double-send
+ * footgun §11's role split exists to prevent.
+ */
+let _warnedPrimaryMismatch = false;
+function tryConsolidateGroup(kind, id) {
+  try {
+    const registry = loadRegistry();
+    const primaryEntry = registry.wallets.find((w) => w.id === registry.primary);
+    if (!_warnedPrimaryMismatch && primaryEntry && primaryEntry.address !== ledgerWalletAddress()) {
+      _warnedPrimaryMismatch = true;
+      log("cron", `PERINGATAN: reportLedgerRole=primary tapi registry.primary=${registry.primary} beralamat lain — cek konfigurasi kedua daemon`);
+    }
+    return consolidatePeriod({ kind, id, registry });
+  } catch (e) {
+    log("cron", `Konsolidasi ${kind} ${id} dilewati (${e.message}) — laporan wallet tunggal`);
+    return null;
+  }
+}
+
+/**
+ * Seal the just-closed period and send its report. Sealing is pure arithmetic
+ * over the ledger files — zero Helius. With `onlyIfUnsealed` (watchdog path)
+ * an already-sealed period sends nothing, so a report can never go out twice.
+ *
+ * Fase 5 role split (§11): EVERY role seals its own wallet's period (the
+ * per-wallet chain must not depend on who reports), but only `primary` sends
+ * anything to Telegram — and what it sends is the GROUP report consolidated
+ * across the registry, falling back to the fase-2 single-wallet report when
+ * there is no registry. A contributor writes its ledger and stops.
  */
 async function runPeriodReport(kind, { onlyIfUnsealed = false } = {}) {
   if (_sealBusy) return;
@@ -239,20 +282,35 @@ async function runPeriodReport(kind, { onlyIfUnsealed = false } = {}) {
     }
     const { record, sealedNow } = ensurePeriodSealed(kind, id);
     if (onlyIfUnsealed && !sealedNow) return;
+    if (config.report.ledgerRole !== "primary") {
+      // §11: contributor menulis ledger dan TIDAK mengirim apa pun ke Telegram.
+      log("cron", `Seal ${kind} ${id} (contributor)${sealedNow ? "" : " — sudah ada"} — tidak mengirim laporan`);
+      return;
+    }
+    const group = tryConsolidateGroup(kind, id);
     // §06: every monthly report carries the running-YTD strip (ytdInMonthly) —
     // costs zero Helius. Weekly never does (too frequent, YTD barely moves).
     let ytd = null;
     if (kind === "month" && config.report.ytdInMonthly) {
       try {
-        ytd = buildYtdReport({ year: Number(id.slice(0, 4)) });
+        ytd = group
+          ? consolidatePeriod({ kind: "ytd", id: id.slice(0, 4) })
+          : buildYtdReport({ year: Number(id.slice(0, 4)) });
       } catch (e) {
         log("cron", `Strip YTD dilewati: ${e.message}`);
       }
     }
-    const msg = formatFinancialReport({ wallet: ledgerWalletAddress(), record, ytd }, { html: true });
-    if (telegramEnabled()) await sendHTML(msg);
-    await sendReportCsvs(record);
-    log("cron", `Laporan ${kind} ${id} ${sealedNow ? "disegel & " : ""}terkirim — integrity_ok=${record.integrity.integrity_ok}`);
+    if (group) {
+      const msg = formatFinancialReport({ wallet: group.group_name ?? "", record: group, ytd }, { html: true });
+      if (telegramEnabled()) await sendHTML(msg);
+      await sendGroupReportCsvs(group);
+      log("cron", `Laporan GRUP ${kind} ${id} terkirim — complete=${group.integrity.complete}, integrity_ok=${group.integrity.integrity_ok}`);
+    } else {
+      const msg = formatFinancialReport({ wallet: ledgerWalletAddress(), record, ytd }, { html: true });
+      if (telegramEnabled()) await sendHTML(msg);
+      await sendReportCsvs(record);
+      log("cron", `Laporan ${kind} ${id} ${sealedNow ? "disegel & " : ""}terkirim — integrity_ok=${record.integrity.integrity_ok}`);
+    }
   } catch (error) {
     log("cron_error", `Laporan ${kind} gagal: ${error.message}`);
   } finally {
@@ -267,7 +325,8 @@ async function runPeriodReport(kind, { onlyIfUnsealed = false } = {}) {
  * assertion 7 on every later period. onlyIfUnsealed keeps re-sends impossible.
  */
 async function maybeRunMissedPeriodReports() {
-  if (config.report.ledgerRole !== "primary") return;
+  // Every role runs this — a contributor that slept through Monday 00:20 must
+  // still seal (runPeriodReport suppresses its sends internally, §11).
   // Order is load-bearing: month BEFORE year — the year seal reads the
   // December seal (assertion 10). ensurePeriodSealed("year") additionally
   // seals leftover months itself, so the order here is belt and braces.
@@ -950,33 +1009,33 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }, { timezone: 'UTC' });
   }
 
-  // Periodic financial reports (fase 2) — primary role only: with two daemons
-  // in one Telegram chat, a contributor sending its own copy would double
-  // every report. 00:20/00:30 leave the 00:05 snapshot a head start, so a
+  // Periodic financial reports (fase 2/5) — the crons run on EVERY role now:
+  // a contributor must still seal its own periods on schedule (assertion 7's
+  // chain per wallet), it just never sends anything to Telegram — the send
+  // gate lives inside runPeriodReport, so two daemons in one chat can never
+  // double a report. 00:20/00:30 leave the 00:05 snapshot a head start, so a
   // period close never races its own raw material.
   let weeklyReportTask = null;
   let monthlyReportTask = null;
   let yearlyReportTask = null;
-  if (config.report.ledgerRole === "primary") {
-    if (config.report.weeklyEnabled) {
-      weeklyReportTask = cron.schedule(`20 0 * * 1`, async () => {
-        await runPeriodReport("week");
-      }, { timezone: 'UTC' });
-    }
-    if (config.report.monthlyEnabled) {
-      monthlyReportTask = cron.schedule(`30 0 1 * *`, async () => {
-        await runPeriodReport("month");
-      }, { timezone: 'UTC' });
-    }
-    // 1 Januari menyalakan tiga cron berurutan (00:20 minggu bila Senin →
-    // 00:30 bulan menyegel Desember → 00:35 tahun membaca seal Desember).
-    // Urutannya dijaga dua lapis: jam cron ini + ensurePeriodSealed("year")
-    // yang menyegel bulan tertinggal lebih dulu.
-    if (config.report.yearlyEnabled) {
-      yearlyReportTask = cron.schedule(`35 0 1 1 *`, async () => {
-        await runPeriodReport("year");
-      }, { timezone: 'UTC' });
-    }
+  if (config.report.weeklyEnabled) {
+    weeklyReportTask = cron.schedule(`20 0 * * 1`, async () => {
+      await runPeriodReport("week");
+    }, { timezone: 'UTC' });
+  }
+  if (config.report.monthlyEnabled) {
+    monthlyReportTask = cron.schedule(`30 0 1 * *`, async () => {
+      await runPeriodReport("month");
+    }, { timezone: 'UTC' });
+  }
+  // 1 Januari menyalakan tiga cron berurutan (00:20 minggu bila Senin →
+  // 00:30 bulan menyegel Desember → 00:35 tahun membaca seal Desember).
+  // Urutannya dijaga dua lapis: jam cron ini + ensurePeriodSealed("year")
+  // yang menyegel bulan tertinggal lebih dulu.
+  if (config.report.yearlyEnabled) {
+    yearlyReportTask = cron.schedule(`35 0 1 1 *`, async () => {
+      await runPeriodReport("year");
+    }, { timezone: 'UTC' });
   }
 
   // PnL reconcile — the 30s post-close window often catches the Meteora datapi
@@ -1623,7 +1682,8 @@ function formatHelpText() {
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
     "/pnl — full PnL report (bookkeeping vs on-chain, all costs)",
-    "/report week | month | year | ytd | <YYYY-Www> | <YYYY-MM> | <YYYY> — laporan keuangan dari ledger (0 Helius)",
+    "/report week | month | year | ytd | <YYYY-Www> | <YYYY-MM> | <YYYY> — laporan keuangan dari ledger (0 Helius; primary = laporan grup)",
+    "/wallets — registry wallet grup + kesegaran ledger masing-masing",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
@@ -1780,9 +1840,18 @@ async function telegramHandler(msg) {
         id = arg;
       } else if (arg === "ytd") {
         // YTD: never sealed, computed on demand — zero Helius, any time.
-        const rec = buildYtdReport({ year: new Date().getUTCFullYear() });
-        await sendHTML(formatFinancialReport({ wallet: ledgerWalletAddress(), record: rec }, { html: true }));
-        await sendReportCsvs(rec); // YTD: periods + curve mingguan — tanpa closes (§09)
+        // Primary serves the GROUP YTD (consolidate.js); contributor and a
+        // registry-less deployment serve their own wallet's YTD.
+        const year = new Date().getUTCFullYear();
+        const groupYtd = config.report.ledgerRole === "primary" ? tryConsolidateGroup("ytd", String(year)) : null;
+        if (groupYtd) {
+          await sendHTML(formatFinancialReport({ wallet: groupYtd.group_name ?? "", record: groupYtd }, { html: true }));
+          await sendGroupReportCsvs(groupYtd);
+        } else {
+          const rec = buildYtdReport({ year });
+          await sendHTML(formatFinancialReport({ wallet: ledgerWalletAddress(), record: rec }, { html: true }));
+          await sendReportCsvs(rec); // YTD: periods + curve mingguan — tanpa closes (§09)
+        }
         return;
       } else if (arg === "year") {
         kind = "year";
@@ -1798,6 +1867,18 @@ async function telegramHandler(msg) {
       // an existing seal is returned as-is (immutable, never resealed here).
       // For "year" it seals leftover months first (urutan 1 Januari).
       const report = ensurePeriodSealed(kind, id);
+      // Fase 5: primary serves the GROUP report (falls back to single-wallet
+      // when there is no registry); contributor answers with its own wallet.
+      const group = config.report.ledgerRole === "primary" ? tryConsolidateGroup(kind, id) : null;
+      if (group) {
+        let ytd = null;
+        if (kind === "month" && config.report.ytdInMonthly) {
+          try { ytd = consolidatePeriod({ kind: "ytd", id: id.slice(0, 4) }); } catch { /* strip optional */ }
+        }
+        await sendHTML(formatFinancialReport({ wallet: group.group_name ?? "", record: group, ytd }, { html: true }));
+        await sendGroupReportCsvs(group);
+        return;
+      }
       if (kind === "month" && config.report.ytdInMonthly) {
         try { report.ytd = buildYtdReport({ year: Number(id.slice(0, 4)) }); } catch { /* strip optional */ }
       }
@@ -1805,6 +1886,33 @@ async function telegramHandler(msg) {
       await sendReportCsvs(report.record);
     } catch (e) {
       await sendMessage(`Laporan gagal: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/wallets") {
+    // Fase 5 (§12): registry + kesegaran ledger tiap wallet — read-only.
+    try {
+      const registry = loadRegistry();
+      const lines = [`👛 ${registry.group_name ?? "Registry"} — primary: ${registry.primary}`];
+      for (const w of registry.wallets) {
+        let freshness = "ledger kosong";
+        try {
+          const { snapshots, periods } = readLedger(w);
+          if (snapshots.length) {
+            freshness = `snapshot terakhir ${snapshots[snapshots.length - 1].id} · ${periods.length} seal`;
+          }
+        } catch (e) {
+          freshness = `ledger tidak terbaca: ${e.message}`;
+        }
+        lines.push(
+          `• ${w.label ?? w.id} — ${w.address.slice(0, 4)}…${w.address.slice(-4)}`,
+          `  aktif ${w.active_from}${w.active_to ? ` → ${w.active_to}` : ""} · ${w.transport?.kind ?? "fs"} · ${freshness}`,
+        );
+      }
+      await sendMessage(lines.join("\n"));
+    } catch (e) {
+      await sendMessage(`Registry (${resolveRegistryPath()}): ${e.message}`).catch(() => {});
     }
     return;
   }

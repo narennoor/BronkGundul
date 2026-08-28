@@ -369,6 +369,12 @@ function periodTitle(record) {
  * SOL-only. A failed assertion never hides the report — it labels it. Pass
  * `ytd` on a monthly report to render the running-YTD strip (§06,
  * `ytdInMonthly`) plus the "Σ n seal bulanan ≡ YTD" check line.
+ *
+ * A GROUP record (consolidate.js, scope: "GROUP") renders the same statement
+ * plus the §06 group blocks: the Per Wallet table, the eliminated-internal
+ * line, per-wallet completeness, and the unmatched/price-skew labels. LLM per
+ * wallet may be the literal "shared" (same OpenRouter key on both daemons —
+ * deduped once at group level, never attributed twice).
  */
 export function formatFinancialReport({ wallet, record, ytd = null }, { html = false } = {}) {
   const p = record.pnl;
@@ -376,6 +382,7 @@ export function formatFinancialReport({ wallet, record, ytd = null }, { html = f
   const sp = record.sol_price_close;
   const hasUsd = Number.isFinite(sp) && sp > 0;
   const isYtd = record.kind === "ytd";
+  const isGroup = record.scope === "GROUP";
 
   const row = (label, sol, usdOverride) => {
     const usd = usdOverride !== undefined ? usdOverride : hasUsd && sol != null ? sol * sp : null;
@@ -392,8 +399,16 @@ export function formatFinancialReport({ wallet, record, ytd = null }, { html = f
     : null;
   const assert6ok = !it.assertions_failed.some((a) => a.startsWith("6:"));
 
+  const who = isGroup
+    ? `GRUP ${record.group_name ?? ""}`.trim()
+    : `${wallet.slice(0, 4)}…${wallet.slice(-4)}`;
+  const stamp = record.sealed_at
+    ? `disegel ${stampOf(record.sealed_at)}`
+    : record.as_of
+      ? `as of ${stampOf(record.as_of)}`
+      : `disusun ${stampOf(record.generated_at)}`;
   const lines = [
-    `${wallet.slice(0, 4)}…${wallet.slice(-4)} · ${stampOf(record.from)} → ${stampOf(record.to)} UTC · ${record.sealed_at ? `disegel ${stampOf(record.sealed_at)}` : `as of ${stampOf(record.as_of)}`}`,
+    `${who} · ${stampOf(record.from)} → ${stampOf(record.to)} UTC · ${stamp}`,
     "",
     `LABA RUGI${" ".repeat(11)}${"SOL".padStart(10)}${hasUsd ? "USD".padStart(11) : ""}`,
     row("Fee LP", p.fee_lp_sol),
@@ -414,6 +429,9 @@ export function formatFinancialReport({ wallet, record, ytd = null }, { html = f
     eqRow("Saldo awal", e.saldo_awal_sol),
     `${"Deposit".padEnd(20)}${fmtSol(e.deposit_sol).padStart(10)}`,
     `${"Withdrawal".padEnd(20)}${fmtSol(e.withdrawal_sol).padStart(10)}`,
+    isGroup && e.internal_eliminated_sol > 0
+      ? `${"  internal dielim.".padEnd(20)}${fmtSol(e.internal_eliminated_sol, false).padStart(10)}  (bukan setoran/penarikan grup)`
+      : null,
     eqRow("Modal dasar", e.modal_dasar_sol),
     "",
     eqRow("Saldo bebas", e.saldo_bebas_sol),
@@ -434,7 +452,25 @@ export function formatFinancialReport({ wallet, record, ytd = null }, { html = f
     `Closes ${p.closes} | ${p.wins}W/${p.closes - p.wins}L${winRate != null ? ` (${winRate}%)` : ""}`,
   ];
 
-  // running-YTD strip on the monthly report (§06, ytdInMonthly)
+  // §06: the Per Wallet block — the reason distinct OpenRouter keys matter
+  // (per-wallet Net Rill is only comparable when LLM attribution is exact).
+  if (isGroup && Array.isArray(record.wallets)) {
+    lines.push("", `PER WALLET${" ".repeat(10)}${"NET RILL".padStart(10)}${"ROI".padStart(9)}`);
+    for (const w of record.wallets) {
+      const marks = [
+        w.llm_cost_usd === "shared" ? "LLM shared" : null,
+        !w.sealed ? "belum seal" : null,
+        !w.complete ? `${w.missing_dates} hari bolong` : null,
+      ].filter(Boolean);
+      lines.push(
+        `${String(w.label).slice(0, 20).padEnd(20)}${fmtSol(w.net_rill_sol).padStart(10)}${fmtPct(w.dietz_pct).padStart(9)}${marks.length ? `  (${marks.join(", ")})` : ""}`,
+      );
+    }
+    lines.push(`${"Grup".padEnd(20)}${fmtSol(p.net_rill_sol).padStart(10)}${fmtPct(record.roi.dietz_pct).padStart(9)}`);
+  }
+
+  // running-YTD strip on the monthly report (§06, ytdInMonthly) — the strip
+  // may be a wallet YTD (buildYtdReport) or a group YTD (consolidatePeriod)
   if (ytd) {
     const yp = ytd.pnl;
     lines.push(
@@ -443,12 +479,32 @@ export function formatFinancialReport({ wallet, record, ytd = null }, { html = f
       `${"Net Rill".padEnd(20)}${fmtSol(yp.net_rill_sol).padStart(10)}`,
       `${"ROI YTD (Dietz)".padEnd(20)}${fmtPct(ytd.roi.dietz_pct).padStart(10)}`,
       `${"TWR YTD".padEnd(20)}${fmtPct(ytd.roi.twr_pct).padStart(10)}`,
-      `  ${ytd.months_sealed} bulan tersegel · as of ${stampOf(ytd.as_of)}`,
+      ytd.scope === "GROUP"
+        ? `  grup · as of ${stampOf(ytd.as_of)}`
+        : `  ${ytd.months_sealed} bulan tersegel · as of ${stampOf(ytd.as_of)}`,
     );
   }
 
   lines.push("", "INTEGRITAS");
-  if (isYtd) {
+  if (isGroup) {
+    const expected = it.windows_expected ?? windowsExpected;
+    lines.push(
+      `Window lengkap ${it.windows}/${expected} ${it.complete ? "✓" : "✗"} · trusted ${it.all_trusted ? "✓" : "✗"} · drift kum. ${it.cum_drift_sol} SOL`,
+      `Wallet lengkap: ${record.wallets.map((w) => `${w.label} ${w.complete ? "✓" : `✗(${w.missing_dates}h)`}`).join(" · ")}`,
+    );
+    if (e.internal_eliminated_sol > 0) {
+      lines.push(`Transfer internal ${e.internal_eliminated_sol.toFixed(4)} SOL dieliminasi (${record.internal_transfers.length} pasangan)`);
+    }
+    if (record.unmatched_internal.length) {
+      lines.push(`⚠ ${record.unmatched_internal.length} transfer internal tak berpasangan — dihitung sebagai flow eksternal`);
+    }
+    if (record.llm_shared_keys?.length) {
+      lines.push(`⚠ LLM key dipakai bersama (${record.llm_shared_keys.length}) — biaya dihitung sekali, kolom wallet = shared`);
+    }
+    if (record.price_skew_pct != null) {
+      lines.push(`⚠ Harga SOL antar wallet menyimpang ${record.price_skew_pct}% — grup memakai harga primary`);
+    }
+  } else if (isYtd) {
     lines.push(
       `Bulan tersegel ${record.months_sealed} · window ${it.windows} · trusted ${it.all_trusted ? "✓" : "✗"} · drift kum. ${it.cum_drift_sol} SOL`,
       `Σ ${record.months_sealed} seal bulanan ≡ fold snapshot ${it.sigma_ok ? "✓" : "✗"}`,
@@ -458,7 +514,7 @@ export function formatFinancialReport({ wallet, record, ytd = null }, { html = f
       `Window ${it.windows}/${windowsExpected} ${it.windows === windowsExpected ? "✓" : "✗"} · trusted ${it.all_trusted ? "✓" : "✗"} · drift kum. ${it.cum_drift_sol} SOL`,
     );
   }
-  if (ytd) {
+  if (ytd && ytd.scope !== "GROUP") {
     lines.push(`Σ ${ytd.months_sealed} seal bulanan ≡ YTD ${ytd.integrity.sigma_ok ? "✓" : "✗"}`);
   }
   if (!it.integrity_ok) {

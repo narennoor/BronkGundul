@@ -137,6 +137,7 @@
   "reportWalkOverlapMin": 30,
   "reportDriftToleranceSol": 0.001,
   "reportPositionValuation": "cost",
+  "reportGroupPriceSource": "primary",
 
   "gmgnFeeSource": "gmgn",
   "gmgnApiKey": "",
