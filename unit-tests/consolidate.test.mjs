@@ -492,6 +492,38 @@ test("CSV grup: baris GROUP dulu, lalu WALLET; internal_eliminated hanya di GROU
   assert.equal(curve.length, 1 + 32 * 2); // 32 boundary Agu (1 Agu–1 Sep) × 2 wallet
 });
 
+// ── jangkar Dietz: jendela mulai dari aktivitas pertama grup ─────────
+// Tahun genesis: ledger mulai di tengah kalender YTD. Bobot Dietz harus
+// dihitung atas jendela AKTIF (snapshot pembuka paling awal → as_of), bukan
+// sejak 1 Januari — kalau tidak, modal gabung berbobot kecil dan ROI
+// meledak (−210% saat kerugian riil −33%, insiden 28 Agu 2026).
+
+test("Dietz grup: jendela dari aktivitas pertama, bukan awal kalender", () => {
+  const K = kp("KWal");
+  const L = kp("LWal");
+  const regKL = {
+    version: 1, group_name: "KL", primary: K.id,
+    wallets: [regEntry(K, "2026-08-01"), regEntry(L, "2026-08-16")],
+  };
+  // Tanpa LLM key → net rill = gross = akresi 0.001/hari/wallet.
+  writeLedger(K, makeSnapshots({ start: AUG_FROM, end: END, saldo0: 20, price: 200, llmKey: null, llm0: 0, llmStep: 0 }));
+  writeLedger(L, makeSnapshots({ start: Date.parse("2026-08-16T00:00:00Z"), end: END, saldo0: 10, price: 200, llmKey: null, llm0: 0, llmStep: 0 }));
+  const rec = consolidatePeriod({ kind: "ytd", id: "2026", registry: regKL, now: Date.parse("2026-09-01T00:30:00Z") });
+
+  // Kedua wallet lahir di tengah kalender → saldo awal 0, modal = setoran gabung.
+  close(rec.equity.saldo_awal_sol, 0);
+  close(rec.equity.deposit_sol, 30);
+  close(rec.pnl.net_rill_sol, r9(31 * 0.001 + 16 * 0.001));
+
+  // Jangkar = 1 Agu (snapshot pembuka paling awal), span 31 hari: K berbobot
+  // penuh (masuk tepat di jangkar), L berbobot 16/31. Dengan span 1 Jan–1 Sep
+  // (bug lama) basisnya cuma 20×31/243 + 10×16/243 ≈ 3.21 → ROI menggelembung.
+  const base = 20 + 10 * (16 / 31);
+  const expected = Math.round(((31 * 0.001 + 16 * 0.001) / base) * 10000) / 100;
+  assert.equal(rec.roi.dietz_pct, expected);
+  assert.equal(rec.integrity.integrity_ok, true, rec.integrity.assertions_failed.join("; "));
+});
+
 // ── (a) nol Helius di seluruh jalur grup — WAJIB test terakhir ──────
 
 test("aturan nol-walk: seluruh jalur konsolidasi tidak memanggil fetch", () => {

@@ -462,7 +462,22 @@ export function consolidatePeriod({ kind, id, now = Date.now(), registry = null 
     if (base > 1e-9) twrFactor *= 1 + (Tb - prevT - flowNet - llmDaySol) / base;
     prevT = Tb;
   }
-  const spanMs = to - from;
+  // Jendela bobot Dietz mulai dari AKTIVITAS PERTAMA grup yang TEREKAM
+  // ledger (boundary snapshot pembuka paling awal di antara wallet periode
+  // ini), bukan awal kalender periode — sejajar dengan spanFrom di
+  // buildYtdReport level wallet. Tanpa jangkar ini, YTD tahun genesis
+  // (ledger mulai 21 Jul) merentang Jan–Agu: modal gabung berbobot ~0,16
+  // dan Dietz meledak (−210% saat kerugian riil −33%, 28 Agu 2026). Flow
+  // pada/sebelum jangkar berbobot penuh — modal itu hadir sepanjang jendela
+  // aktif; saldoAwal tetap dari opening non-joining (0 saat grup lahir di
+  // tengah periode) supaya tidak double-count dengan setoran gabung.
+  // Periode normal (wallet aktif sejak boundary pembuka) tidak berubah:
+  // oMs == from. Ledger yang di-backfill mundur menggeser jangkar ini
+  // otomatis pada perhitungan berikutnya (record grup tak pernah disegel).
+  const activityStartMs = perWallet.length
+    ? Math.max(from, Math.min(...perWallet.map((p) => p.oMs)))
+    : from;
+  const spanMs = Math.max(1, to - activityStartMs);
   let weighted = 0;
   for (const f of timedExtFlows) {
     weighted += Math.min(1, Math.max(0, (to - f.ts * 1000) / spanMs)) * f.sol;
