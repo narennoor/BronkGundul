@@ -236,21 +236,31 @@ export async function sendHTML(html) {
   return postTelegram("sendMessage", { text: plain });
 }
 
+// MIME per ekstensi untuk sendDocument — Telegram menyimpan tipe ini dan
+// klien memakainya saat membuka; ekstensi tak dikenal jatuh ke octet-stream.
+const DOCUMENT_MIME = {
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".csv": "text/csv",
+};
+
 /**
- * Send a file as a Telegram document (multipart/form-data) — the §09 CSV
- * attachments. Uses Node 22's global FormData/Blob (no dependency); fetch
- * writes the multipart boundary itself, so no Content-Type header here.
- * Caption max 1024 chars (Telegram limit), document max 50 MB — the CSVs are
- * tens of KB. Returns the API result or null; a failed document must never
- * take the text report down with it, so this never throws.
+ * Send a file as a Telegram document (multipart/form-data) — the report
+ * attachments (XLSX workbook since fase 7; CSV still supported). Uses Node
+ * 22's global FormData/Blob (no dependency); fetch writes the multipart
+ * boundary itself, so no Content-Type header here. Caption max 1024 chars
+ * (Telegram limit), document max 50 MB — the workbooks are tens of KB.
+ * Returns the API result or null; a failed document must never take the text
+ * report down with it, so this never throws.
  */
 export async function sendDocument(buffer, filename, caption = "") {
   if (!TOKEN || !chatId) return null;
   try {
+    const ext = String(filename).toLowerCase().match(/\.[a-z0-9]+$/)?.[0];
+    const type = DOCUMENT_MIME[ext] ?? "application/octet-stream";
     const form = new FormData();
     form.append("chat_id", String(chatId));
     if (caption) form.append("caption", String(caption).slice(0, 1024));
-    form.append("document", new Blob([buffer], { type: "text/csv" }), String(filename));
+    form.append("document", new Blob([buffer], { type }), String(filename));
     const res = await tgFetch(`${BASE}/sendDocument`, { method: "POST", body: form });
     if (!res.ok) {
       const err = await res.text();

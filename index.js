@@ -30,7 +30,7 @@ import {
 import { generateBriefing } from "./briefing.js";
 import { takeSnapshot, healGap, loadSnapshots, ledgerWalletAddress } from "./equity-snapshot.js";
 import { ensurePeriodSealed, formatFinancialReport, buildYtdReport, lastClosedPeriodId, periodBounds } from "./financial-report.js";
-import { buildReportCsvs, buildGroupReportCsvs } from "./financial-csv.js";
+import { buildReportXlsx, buildGroupReportXlsx } from "./financial-xlsx.js";
 import { consolidatePeriod } from "./consolidate.js";
 import { loadRegistry, resolveRegistryPath } from "./ledger-registry.js";
 import { readLedger } from "./ledger-transport.js";
@@ -204,31 +204,33 @@ async function maybeRunMissedSnapshot() {
 }
 
 /**
- * Fase 4 (§09): the CSV attachments that follow a report's text summary —
- * meridian_periods.csv (continuous, all kinds) + closes/curve per report kind.
- * Runs AFTER the text went out and swallows its own failures: an attachment
- * problem must never take down a report that already exists, and the next
- * report rebuilds all three files from the ledger anyway.
+ * Fase 4 (§09) / fase 7: the attachment that follows a report's text summary —
+ * since fase 7 a single XLSX workbook (sheet Periode transposed + Closes +
+ * Kurva per report kind) instead of 2-3 CSV files; `reportCsvEnabled` keeps
+ * gating it (key name historical). Runs AFTER the text went out and swallows
+ * its own failures: an attachment problem must never take down a report that
+ * already exists, and the next report rebuilds the workbook from the ledger
+ * anyway.
  */
-async function sendReportCsvs(record) {
+async function sendReportAttachments(record) {
   if (!config.report.csvEnabled || !telegramEnabled()) return;
   try {
-    for (const f of buildReportCsvs(record, { wallet: ledgerWalletAddress() })) {
+    for (const f of buildReportXlsx(record, { wallet: ledgerWalletAddress() })) {
       await sendDocument(f.buffer, f.filename, f.caption);
     }
   } catch (e) {
-    log("cron_error", `CSV laporan ${record.kind} ${record.id} gagal: ${e.message}`);
+    log("cron_error", `Lampiran laporan ${record.kind} ${record.id} gagal: ${e.message}`);
   }
 }
 
-async function sendGroupReportCsvs(groupRecord) {
+async function sendGroupReportAttachments(groupRecord) {
   if (!config.report.csvEnabled || !telegramEnabled()) return;
   try {
-    for (const f of buildGroupReportCsvs(groupRecord)) {
+    for (const f of buildGroupReportXlsx(groupRecord)) {
       await sendDocument(f.buffer, f.filename, f.caption);
     }
   } catch (e) {
-    log("cron_error", `CSV grup ${groupRecord.kind} ${groupRecord.id} gagal: ${e.message}`);
+    log("cron_error", `Lampiran grup ${groupRecord.kind} ${groupRecord.id} gagal: ${e.message}`);
   }
 }
 
@@ -303,12 +305,12 @@ async function runPeriodReport(kind, { onlyIfUnsealed = false } = {}) {
     if (group) {
       const msg = formatFinancialReport({ wallet: group.group_name ?? "", record: group, ytd }, { html: true });
       if (telegramEnabled()) await sendHTML(msg);
-      await sendGroupReportCsvs(group);
+      await sendGroupReportAttachments(group);
       log("cron", `Laporan GRUP ${kind} ${id} terkirim — complete=${group.integrity.complete}, integrity_ok=${group.integrity.integrity_ok}`);
     } else {
       const msg = formatFinancialReport({ wallet: ledgerWalletAddress(), record, ytd }, { html: true });
       if (telegramEnabled()) await sendHTML(msg);
-      await sendReportCsvs(record);
+      await sendReportAttachments(record);
       log("cron", `Laporan ${kind} ${id} ${sealedNow ? "disegel & " : ""}terkirim — integrity_ok=${record.integrity.integrity_ok}`);
     }
   } catch (error) {
@@ -1846,11 +1848,11 @@ async function telegramHandler(msg) {
         const groupYtd = config.report.ledgerRole === "primary" ? tryConsolidateGroup("ytd", String(year)) : null;
         if (groupYtd) {
           await sendHTML(formatFinancialReport({ wallet: groupYtd.group_name ?? "", record: groupYtd }, { html: true }));
-          await sendGroupReportCsvs(groupYtd);
+          await sendGroupReportAttachments(groupYtd);
         } else {
           const rec = buildYtdReport({ year });
           await sendHTML(formatFinancialReport({ wallet: ledgerWalletAddress(), record: rec }, { html: true }));
-          await sendReportCsvs(rec); // YTD: periods + curve mingguan — tanpa closes (§09)
+          await sendReportAttachments(rec); // YTD: sheet Periode + Kurva mingguan — tanpa Closes (§09)
         }
         return;
       } else if (arg === "year") {
@@ -1876,14 +1878,14 @@ async function telegramHandler(msg) {
           try { ytd = consolidatePeriod({ kind: "ytd", id: id.slice(0, 4) }); } catch { /* strip optional */ }
         }
         await sendHTML(formatFinancialReport({ wallet: group.group_name ?? "", record: group, ytd }, { html: true }));
-        await sendGroupReportCsvs(group);
+        await sendGroupReportAttachments(group);
         return;
       }
       if (kind === "month" && config.report.ytdInMonthly) {
         try { report.ytd = buildYtdReport({ year: Number(id.slice(0, 4)) }); } catch { /* strip optional */ }
       }
       await sendHTML(formatFinancialReport(report, { html: true }));
-      await sendReportCsvs(report.record);
+      await sendReportAttachments(report.record);
     } catch (e) {
       await sendMessage(`Laporan gagal: ${e.message}`).catch(() => {});
     }

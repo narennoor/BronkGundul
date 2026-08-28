@@ -1,14 +1,19 @@
-// financial-csv.js — lampiran CSV laporan keuangan (§09, fase 4).
+// financial-csv.js — data lampiran laporan keuangan (§09, fase 4).
 //
-// Tiga berkas: meridian_periods.csv (berkelanjutan, satu untuk SEMUA jenis,
-// kolom `kind` yang membedakan — dibangun ulang utuh dari periods.json setiap
-// kirim, bukan di-append, jadi idempoten dan tidak pernah menyimpang dari
-// sumbernya), meridian_closes_<period_id>.csv (detail per posisi tertutup dari
-// bookkeeping lessons.json — filter recorded_at yang sama dengan bookEntriesIn,
-// jadi jumlah barisnya SELALU sama dengan pnl.closes di seal), dan
-// meridian_curve_<period_id>.csv (titik kurva ekuitas dari snapshot harian —
-// granularitas day|week menyesuaikan jenis laporan, ongkos nol karena
-// snapshotnya sudah ada).
+// Sejak fase 7 modul ini adalah SUMBER DATA lampiran, bukan lagi format
+// kirimnya: jalur Telegram melampirkan satu workbook XLSX (financial-xlsx.js)
+// yang dibangun dari nilai sel bertipe di sini. Serializer CSV dipertahankan
+// utuh — dialah rujukan §09 (urutan+nama kolom, kosong ≠ nol) dan tetap
+// dipakai unit test sebagai spesifikasi yang bisa di-diff.
+//
+// Tiga tabel: periods (berkelanjutan, satu untuk SEMUA jenis, kolom `kind`
+// yang membedakan — dibangun ulang utuh dari periods.json setiap kirim, bukan
+// di-append, jadi idempoten dan tidak pernah menyimpang dari sumbernya),
+// closes_<period_id> (detail per posisi tertutup dari bookkeeping lessons.json
+// — filter recorded_at yang sama dengan bookEntriesIn, jadi jumlah barisnya
+// SELALU sama dengan pnl.closes di seal), dan curve_<period_id> (titik kurva
+// ekuitas dari snapshot harian — granularitas day|week menyesuaikan jenis
+// laporan, ongkos nol karena snapshotnya sudah ada).
 //
 // Konvensi format (§09): UTF-8 DENGAN BOM (tanpa itu Excel di Windows mengacak
 // karakter non-ASCII di nama pool), CRLF, pemisah koma, desimal titik, SOL 4
@@ -33,7 +38,7 @@ import { consolidatePeriod } from "./consolidate.js";
 const BOM = "\uFEFF";
 const EOL = "\r\n"; // Excel Windows
 
-// ─── formatter sel ───────────────────────────────────────────────────
+// ─── formatter sel CSV ───────────────────────────────────────────────
 // null/undefined → sel kosong (tidak berlaku ≠ nol). Angka SELALU polos
 // (tanpa "+" eksplisit) supaya Excel membacanya sebagai angka, bukan teks;
 // tanda ikut konvensi record (pendapatan +, biaya −). (-0).toFixed() memberi
@@ -43,9 +48,11 @@ const usd2 = (v) => (Number.isFinite(v) ? v.toFixed(2) : "");
 const pct2 = (v) => (Number.isFinite(v) ? v.toFixed(2) : "");
 const intc = (v) => (Number.isFinite(v) ? String(Math.round(v)) : "");
 const boolc = (v) => (v == null ? "" : v ? "true" : "false");
-const isoc = (v) => {
+// Timestamp dinormalkan SEKALI di nilai bertipe (isoRaw) — formatter CSV-nya
+// tinggal identitas-atau-kosong.
+const isoRaw = (v) => {
   const ms = Date.parse(v);
-  return Number.isFinite(ms) ? new Date(ms).toISOString().replace(".000Z", "Z") : "";
+  return Number.isFinite(ms) ? new Date(ms).toISOString().replace(".000Z", "Z") : null;
 };
 
 function cell(v) {
@@ -58,7 +65,25 @@ function toCsvBuffer(header, rows) {
   return Buffer.from(BOM + lines.join(EOL) + EOL, "utf8");
 }
 
-// ─── meridian_periods.csv ────────────────────────────────────────────
+// ─── nilai sel bertipe (dipakai CSV di sini + XLSX di financial-xlsx.js) ──
+// Nilai MENTAH (number/bool/string/null), bukan string terformat: penyaji
+// XLSX butuh angka sungguhan supaya Excel bisa memformat/menjumlahkannya.
+// Tipe per kolom memberi tahu penyaji cara menampilkan: sol → 0.0000,
+// usd/pct → 0.00, int → bulat, bool → true/false/kosong, iso/text → teks.
+
+const CSV_FMT = {
+  sol: sol4,
+  usd: usd2,
+  pct: pct2,
+  int: intc,
+  bool: boolc,
+  iso: (v) => v ?? "",
+  text: (v) => v ?? "",
+};
+
+const rowFromValues = (columns, types, vals) => columns.map((c) => CSV_FMT[types[c]](vals[c]));
+
+// ─── meridian_periods ────────────────────────────────────────────────
 
 // Urutan dan nama kolom PERSIS §09 — jangan diubah: berkas ini kumulatif dan
 // yang lama harus tetap bisa di-diff/di-pivot terhadap yang baru.
@@ -74,26 +99,45 @@ export const PERIODS_CSV_COLUMNS = [
   "closes", "win_rate_pct", "sol_price_close", "integrity_ok", "cum_drift_sol", "sealed_at",
 ];
 
-// Satu baris §09 dari satu record periode (seal wallet ATAU record grup dari
-// consolidatePeriod — bentuknya sama; record grup punya internal_eliminated_sol
-// terisi dan sealed_at kosong karena record grup tidak pernah disegel).
-function periodCsvRow(r, scope, walletId) {
+export const PERIOD_CELL_TYPES = {
+  period_id: "text", kind: "text", from_utc: "iso", to_utc: "iso", scope: "text", wallet_id: "text",
+  fee_lp_sol: "sol", impermanent_loss_sol: "sol", net_revenue_sol: "sol",
+  exec_cost_sol: "sol", exec_cost_measured_sol: "sol", gas_fee_sol: "sol", gross_rill_sol: "sol",
+  llm_cost_sol: "sol", llm_cost_usd: "usd", net_rill_sol: "sol",
+  saldo_awal_sol: "sol", deposit_sol: "sol", withdrawal_sol: "sol", internal_eliminated_sol: "sol", modal_dasar_sol: "sol",
+  saldo_bebas_sol: "sol", modal_posisi_sol: "sol", modal_posisi_rent_sol: "sol", total_ekuitas_sol: "sol",
+  laba_kumulatif_sol: "sol", unrealized_pnl_sol: "sol", unrealized_suspect: "bool",
+  roi_dietz_pct: "pct", twr_pct: "pct",
+  closes: "int", win_rate_pct: "pct", sol_price_close: "usd", integrity_ok: "bool", cum_drift_sol: "sol", sealed_at: "iso",
+};
+
+/**
+ * Nilai §09 dari satu record periode (seal wallet ATAU record grup dari
+ * consolidatePeriod — bentuknya sama; record grup punya internal_eliminated_sol
+ * terisi dan sealed_at kosong karena record grup tidak pernah disegel).
+ */
+export function periodCellValues(r, scope, walletId) {
   const winRate = r.pnl.closes > 0 ? (r.pnl.wins / r.pnl.closes) * 100 : null;
-  return [
-    r.id, r.kind, isoc(r.from), isoc(r.to), scope, walletId,
-    sol4(r.pnl.fee_lp_sol), sol4(r.pnl.impermanent_loss_sol), sol4(r.pnl.net_revenue_sol),
-    sol4(r.pnl.exec_cost_sol), sol4(r.pnl.exec_cost_measured_sol), sol4(r.pnl.gas_fee_sol), sol4(r.pnl.gross_rill_sol),
-    sol4(r.pnl.llm_cost_sol), usd2(r.pnl.llm_cost_usd), sol4(r.pnl.net_rill_sol),
-    sol4(r.equity.saldo_awal_sol), sol4(r.equity.deposit_sol), sol4(r.equity.withdrawal_sol),
-    sol4(r.equity.internal_eliminated_sol), sol4(r.equity.modal_dasar_sol),
-    sol4(r.equity.saldo_bebas_sol), sol4(r.equity.modal_posisi_sol), sol4(r.equity.modal_posisi_rent_sol),
-    sol4(r.equity.total_ekuitas_sol),
-    sol4(r.equity.laba_kumulatif_sol), sol4(r.equity.unrealized_pnl_sol), boolc(r.equity.unrealized_suspect),
-    pct2(r.roi.dietz_pct), pct2(r.roi.twr_pct),
-    intc(r.pnl.closes), pct2(winRate), usd2(r.sol_price_close),
-    boolc(r.integrity.integrity_ok), sol4(r.integrity.cum_drift_sol), isoc(r.sealed_at),
-  ];
+  return {
+    period_id: r.id, kind: r.kind, from_utc: isoRaw(r.from), to_utc: isoRaw(r.to), scope, wallet_id: walletId,
+    fee_lp_sol: r.pnl.fee_lp_sol, impermanent_loss_sol: r.pnl.impermanent_loss_sol, net_revenue_sol: r.pnl.net_revenue_sol,
+    exec_cost_sol: r.pnl.exec_cost_sol, exec_cost_measured_sol: r.pnl.exec_cost_measured_sol,
+    gas_fee_sol: r.pnl.gas_fee_sol, gross_rill_sol: r.pnl.gross_rill_sol,
+    llm_cost_sol: r.pnl.llm_cost_sol, llm_cost_usd: r.pnl.llm_cost_usd, net_rill_sol: r.pnl.net_rill_sol,
+    saldo_awal_sol: r.equity.saldo_awal_sol, deposit_sol: r.equity.deposit_sol, withdrawal_sol: r.equity.withdrawal_sol,
+    internal_eliminated_sol: r.equity.internal_eliminated_sol, modal_dasar_sol: r.equity.modal_dasar_sol,
+    saldo_bebas_sol: r.equity.saldo_bebas_sol, modal_posisi_sol: r.equity.modal_posisi_sol,
+    modal_posisi_rent_sol: r.equity.modal_posisi_rent_sol, total_ekuitas_sol: r.equity.total_ekuitas_sol,
+    laba_kumulatif_sol: r.equity.laba_kumulatif_sol, unrealized_pnl_sol: r.equity.unrealized_pnl_sol,
+    unrealized_suspect: r.equity.unrealized_suspect,
+    roi_dietz_pct: r.roi.dietz_pct, twr_pct: r.roi.twr_pct,
+    closes: r.pnl.closes, win_rate_pct: winRate, sol_price_close: r.sol_price_close,
+    integrity_ok: r.integrity.integrity_ok, cum_drift_sol: r.integrity.cum_drift_sol, sealed_at: isoRaw(r.sealed_at),
+  };
 }
+
+const periodCsvRow = (r, scope, walletId) =>
+  rowFromValues(PERIODS_CSV_COLUMNS, PERIOD_CELL_TYPES, periodCellValues(r, scope, walletId));
 
 /**
  * Satu baris per periode TERSEGEL (week/month/year — YTD tidak pernah masuk,
@@ -117,12 +161,17 @@ export function toGroupPeriodsCsv(items) {
   return toCsvBuffer(PERIODS_CSV_COLUMNS, items.map(({ record, scope, walletId }) => periodCsvRow(record, scope, walletId ?? "")));
 }
 
-// ─── meridian_closes_<period_id>.csv ─────────────────────────────────
+// ─── meridian_closes_<period_id> ─────────────────────────────────────
 
 export const CLOSES_CSV_COLUMNS = [
   "pool", "pair", "deployed_at", "closed_at", "minutes_held",
   "pnl_sol", "fees_sol", "close_reason", "range_efficiency", "wallet_id",
 ];
+
+export const CLOSE_CELL_TYPES = {
+  pool: "text", pair: "text", deployed_at: "iso", closed_at: "iso", minutes_held: "int",
+  pnl_sol: "sol", fees_sol: "sol", close_reason: "text", range_efficiency: "pct", wallet_id: "text",
+};
 
 /**
  * Detail per posisi tertutup, dari entri performance (lessons.json — sumber
@@ -132,14 +181,20 @@ export const CLOSES_CSV_COLUMNS = [
  * campuran sudah dilakukan sekali di jalur fee_lp_sol snapshot dan tidak
  * boleh terjadi dua kali dengan harga berbeda.
  */
+export function closeCellValues(e, walletId) {
+  return {
+    pool: e.pool ?? "", pair: e.pool_name ?? "",
+    deployed_at: isoRaw(e.deployed_at), closed_at: isoRaw(e.closed_at ?? e.recorded_at),
+    minutes_held: e.minutes_held, pnl_sol: e.pnl_sol, fees_sol: e.fees_earned_sol,
+    close_reason: e.close_reason ?? "", range_efficiency: e.range_efficiency, wallet_id: walletId,
+  };
+}
+
 export function toClosesCsv(entries, { walletId } = {}) {
-  const rows = entries.map((e) => [
-    e.pool ?? "", e.pool_name ?? "", isoc(e.deployed_at), isoc(e.closed_at ?? e.recorded_at),
-    intc(e.minutes_held),
-    sol4(e.pnl_sol), sol4(e.fees_earned_sol),
-    e.close_reason ?? "", pct2(e.range_efficiency), walletId,
-  ]);
-  return toCsvBuffer(CLOSES_CSV_COLUMNS, rows);
+  return toCsvBuffer(
+    CLOSES_CSV_COLUMNS,
+    entries.map((e) => rowFromValues(CLOSES_CSV_COLUMNS, CLOSE_CELL_TYPES, closeCellValues(e, walletId))),
+  );
 }
 
 /** Entri performance yang jatuh di [from, to) — kriteria recorded_at yang
@@ -153,37 +208,51 @@ export function closesInWindow(entries, fromMs, toMs) {
     .sort((a, b) => Date.parse(a.recorded_at) - Date.parse(b.recorded_at));
 }
 
-// ─── meridian_curve_<period_id>.csv ──────────────────────────────────
+// ─── meridian_curve_<period_id> ──────────────────────────────────────
 
 export const CURVE_CSV_COLUMNS = [
   "ts_utc", "wallet_id", "saldo_bebas_sol", "modal_posisi_sol", "total_ekuitas_sol",
   "sol_price", "source", "trusted",
 ];
 
+export const CURVE_CELL_TYPES = {
+  ts_utc: "iso", wallet_id: "text", saldo_bebas_sol: "sol", modal_posisi_sol: "sol",
+  total_ekuitas_sol: "sol", sol_price: "usd", source: "text", trusted: "bool",
+};
+
+export function curveCellValues(s, walletId) {
+  return {
+    ts_utc: isoRaw(s.boundary_ts), wallet_id: walletId,
+    saldo_bebas_sol: s.equity.saldo_bebas_sol, modal_posisi_sol: s.equity.modal_posisi_sol,
+    total_ekuitas_sol: s.equity.total_sol,
+    sol_price: s.sol_price, source: s.source ?? "", trusted: s.integrity?.trusted,
+  };
+}
+
 /**
- * Titik kurva ekuitas dari snapshot harian yang sudah ada (ongkos nol).
+ * Pemilih titik kurva dari snapshot harian yang sudah ada (ongkos nol).
  * granularity "day" = semua boundary di [from, to]; "week" = boundary Senin
  * 00:00Z saja, plus KEDUA ujung periode supaya kurvanya selalu mulai dan
  * berakhir di angka laporan (52-an baris untuk setahun, bukan 365). sol_price
  * kosong pada entri derived — harga historis tidak bisa dipulihkan, dan kosong
  * ≠ nol.
  */
-function curveRows(snapshots, { granularity, from, to, walletId }) {
+export function curveSnapshotsIn(snapshots, { granularity, from, to }) {
   if (granularity !== "day" && granularity !== "week") {
     throw new Error(`granularity "${granularity}" tidak dikenal — day | week`);
   }
-  return snapshots
-    .filter((s) => {
-      const b = Date.parse(s.boundary_ts);
-      if (b < from || b > to) return false;
-      if (granularity === "day") return true;
-      return new Date(b).getUTCDay() === 1 || b === from || b === to;
-    })
-    .map((s) => [
-      isoc(s.boundary_ts), walletId,
-      sol4(s.equity.saldo_bebas_sol), sol4(s.equity.modal_posisi_sol), sol4(s.equity.total_sol),
-      usd2(s.sol_price), s.source ?? "", boolc(s.integrity?.trusted),
-    ]);
+  return snapshots.filter((s) => {
+    const b = Date.parse(s.boundary_ts);
+    if (b < from || b > to) return false;
+    if (granularity === "day") return true;
+    return new Date(b).getUTCDay() === 1 || b === from || b === to;
+  });
+}
+
+function curveRows(snapshots, { granularity, from, to, walletId }) {
+  return curveSnapshotsIn(snapshots, { granularity, from, to }).map((s) =>
+    rowFromValues(CURVE_CSV_COLUMNS, CURVE_CELL_TYPES, curveCellValues(s, walletId)),
+  );
 }
 
 export function toCurveCsv(snapshots, { granularity, from, to, walletId } = {}) {
@@ -203,6 +272,44 @@ export function toGroupCurveCsv(series, { granularity, from, to } = {}) {
   return toCsvBuffer(CURVE_CSV_COLUMNS, rows);
 }
 
+// ─── item periode GRUP (dipakai CSV grup + XLSX grup) ────────────────
+
+/**
+ * Union (kind, id) dari seal semua wallet registry, terurut (from, kind)
+ * seperti loadPeriods, sebagai [{ record, scope, walletId }]: baris GROUP
+ * lebih dulu (dihitung ulang lewat consolidatePeriod — deterministik, nol
+ * network, record grup memang tidak pernah disegel) lalu WALLET per wallet.
+ * Konsolidasi satu periode yang gagal (mis. ledger salah satu wallet belum
+ * ada saat itu) melewati baris GROUP-nya saja; baris WALLET tetap ditulis.
+ * ledgers = registry.wallets.map((w) => ({ w, ...readLedger(w) })).
+ */
+export function collectGroupPeriodItems(registry, ledgers) {
+  const byKey = new Map();
+  for (const { w, periods } of ledgers) {
+    for (const p of periods) {
+      const key = `${p.kind}:${p.id}`;
+      if (!byKey.has(key)) byKey.set(key, { kind: p.kind, id: p.id, from: p.from, seals: [] });
+      byKey.get(key).seals.push({ walletId: w.id, record: p });
+    }
+  }
+  const keys = [...byKey.values()].sort((a, b) =>
+    a.from < b.from ? -1 : a.from > b.from ? 1 : a.kind.localeCompare(b.kind),
+  );
+  const items = [];
+  for (const k of keys) {
+    try {
+      items.push({ record: consolidatePeriod({ kind: k.kind, id: k.id, registry }), scope: "GROUP", walletId: "" });
+    } catch {
+      // baris GROUP dilewati — baris WALLET di bawah tetap menceritakan datanya
+    }
+    for (const { w } of ledgers) {
+      const seal = k.seals.find((s) => s.walletId === w.id);
+      if (seal) items.push({ record: seal.record, scope: "WALLET", walletId: w.id });
+    }
+  }
+  return items;
+}
+
 // ─── perakit lampiran per jenis laporan ──────────────────────────────
 
 /**
@@ -217,7 +324,9 @@ export function toGroupCurveCsv(series, { granularity, from, to } = {}) {
  *
  * Murni berkas lokal — nol Helius, nol RPC. Return [{filename, buffer,
  * caption}] siap untuk sendDocument; pemanggil yang memutuskan kirim/tidak
- * (csvEnabled) dan menelan error kirim.
+ * (csvEnabled) dan menelan error kirim. CATATAN fase 7: jalur Telegram kini
+ * mengirim workbook XLSX (financial-xlsx.js); perakit CSV ini tinggal sebagai
+ * spesifikasi §09 + jalur ekspor manual.
  */
 export function buildReportCsvs(record, { wallet }) {
   const files = [];
@@ -258,13 +367,12 @@ export function buildReportCsvs(record, { wallet }) {
 }
 
 /**
- * Lampiran §09 versi GRUP (fase 5) — dikirim primary setelah laporan grup:
+ * Lampiran §09 versi GRUP (fase 5) — bentuk CSV-nya; jalur Telegram memakai
+ * padanan XLSX di financial-xlsx.js:
  *
  *   meridian_periods.csv        baris GROUP lebih dulu lalu WALLET per wallet,
  *                               untuk UNION semua (kind, id) tersegel di
- *                               registry; baris GROUP dihitung ulang lewat
- *                               consolidatePeriod (deterministik, nol network,
- *                               record grup memang tidak pernah disegel)
+ *                               registry (collectGroupPeriodItems)
  *   meridian_closes_<id>.csv    tetap posisi wallet SENDIRI — detail close
  *                               hidup di lessons.json per daemon dan tidak
  *                               diangkut transport ledger (hanya snapshots +
@@ -272,38 +380,12 @@ export function buildReportCsvs(record, { wallet }) {
  *                               jujur dibuat di sini
  *   meridian_curve_<id>.csv     baris per wallet dari ledger masing-masing
  *
- * Murni berkas lokal — nol Helius, nol RPC. Konsolidasi satu periode yang
- * gagal (mis. ledger salah satu wallet belum ada saat itu) melewati baris
- * GROUP-nya saja; baris WALLET tetap ditulis.
+ * Murni berkas lokal — nol Helius, nol RPC.
  */
 export function buildGroupReportCsvs(groupRecord) {
   const registry = loadRegistry();
   const ledgers = registry.wallets.map((w) => ({ w, ...readLedger(w) }));
-
-  // union (kind, id) dari semua wallet, terurut (from, kind) seperti loadPeriods
-  const byKey = new Map();
-  for (const { w, periods } of ledgers) {
-    for (const p of periods) {
-      const key = `${p.kind}:${p.id}`;
-      if (!byKey.has(key)) byKey.set(key, { kind: p.kind, id: p.id, from: p.from, seals: [] });
-      byKey.get(key).seals.push({ walletId: w.id, record: p });
-    }
-  }
-  const keys = [...byKey.values()].sort((a, b) =>
-    a.from < b.from ? -1 : a.from > b.from ? 1 : a.kind.localeCompare(b.kind),
-  );
-  const items = [];
-  for (const k of keys) {
-    try {
-      items.push({ record: consolidatePeriod({ kind: k.kind, id: k.id, registry }), scope: "GROUP", walletId: "" });
-    } catch {
-      // baris GROUP dilewati — baris WALLET di bawah tetap menceritakan datanya
-    }
-    for (const { w } of ledgers) {
-      const seal = k.seals.find((s) => s.walletId === w.id);
-      if (seal) items.push({ record: seal.record, scope: "WALLET", walletId: w.id });
-    }
-  }
+  const items = collectGroupPeriodItems(registry, ledgers);
   const files = [
     {
       filename: "meridian_periods.csv",
