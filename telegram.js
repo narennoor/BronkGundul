@@ -43,6 +43,100 @@ function resolveThread(thread) {
   return thread !== undefined ? thread : _replyThreadId;
 }
 
+// ─── Mention gate for groups ─────────────────────────────────────
+// In a group every message from an allowed user used to reach the LLM, so
+// ordinary chat between members burned agent turns. Now free-form text in a
+// group/supergroup is handled only when it addresses the bot: an @mention
+// of the bot, or a reply to one of the bot's messages. Slash commands and
+// inline-button presses are always handled (a command addressed to ANOTHER
+// bot, `/status@OtherBot`, is dropped). Private chats are untouched. Set
+// TELEGRAM_REQUIRE_MENTION=false to restore the old behaviour.
+const REQUIRE_MENTION_IN_GROUPS =
+  String(process.env.TELEGRAM_REQUIRE_MENTION ?? "true").trim().toLowerCase() !== "false";
+let _botUsername = null; // from getMe, without the leading "@"
+let _botId = null;
+
+/**
+ * Decide whether an inbound text message is addressed to this bot and
+ * return the text with the bot's own @mention stripped, so `@Bot status?`
+ * reaches the handler as `status?` and `/status@Bot` as `/status`.
+ * Pure — exported for unit tests.
+ */
+export function prepareIncomingText(msg, { botUsername = _botUsername, botId = _botId, requireMention = REQUIRE_MENTION_IN_GROUPS } = {}) {
+  const raw = String(msg?.text ?? "");
+  const chatType = msg?.chat?.type || "unknown";
+  const isGroup = chatType === "group" || chatType === "supergroup";
+  const uname = botUsername ? String(botUsername).replace(/^@/, "").toLowerCase() : null;
+  const isOwnMention = (token) => uname != null && String(token).replace(/^@/, "").toLowerCase() === uname;
+
+  // Slash command: `/cmd@SomeBot ...` — Telegram fans commands out to every
+  // bot in the group, so only answer the ones addressed to us (or to nobody).
+  const cmd = raw.match(/^\/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?(\s[\s\S]*)?$/);
+  if (cmd) {
+    const [, name, target, rest = ""] = cmd;
+    if (target && !isOwnMention(target)) return { accept: false, text: raw, reason: "command_for_other_bot" };
+    return { accept: true, text: `/${name}${rest}`.trim() };
+  }
+
+  if (!isGroup || !requireMention) return { accept: true, text: raw.trim() };
+
+  const entities = Array.isArray(msg?.entities) ? msg.entities : [];
+  const mentionSpans = [];
+  let mentioned = false;
+  for (const ent of entities) {
+    if (ent.type === "mention") {
+      const token = raw.slice(ent.offset, ent.offset + ent.length);
+      if (isOwnMention(token)) { mentioned = true; mentionSpans.push(ent); }
+    } else if (ent.type === "text_mention" && botId != null && String(ent.user?.id) === String(botId)) {
+      mentioned = true;
+      mentionSpans.push(ent);
+    }
+  }
+  // Entities can be absent (older clients, forwarded text) — fall back to a
+  // plain token scan for @username.
+  if (!mentioned && uname) {
+    const re = new RegExp(`(^|\\s)@${uname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[^A-Za-z0-9_])`, "i");
+    if (re.test(raw)) mentioned = true;
+  }
+  const replyFromId = msg?.reply_to_message?.from?.id;
+  if (!mentioned && botId != null && replyFromId != null && String(replyFromId) === String(botId)) mentioned = true;
+
+  if (!mentioned) return { accept: false, text: raw, reason: "not_mentioned" };
+
+  // Strip our own @mention(s) so the LLM goal reads naturally.
+  // Entity offsets are UTF-16 code units, same as JS string indices.
+  let text = raw;
+  if (mentionSpans.length) {
+    text = "";
+    let cursor = 0;
+    for (const ent of [...mentionSpans].sort((a, b) => a.offset - b.offset)) {
+      text += raw.slice(cursor, ent.offset);
+      cursor = ent.offset + ent.length;
+    }
+    text += raw.slice(cursor);
+  }
+  if (uname) text = text.replace(new RegExp(`(^|\\s)@${uname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[^A-Za-z0-9_])`, "gi"), "$1");
+  text = text.replace(/\s{2,}/g, " ").trim();
+  return { accept: true, text };
+}
+
+async function fetchBotIdentity() {
+  if (!BASE) return false;
+  try {
+    const res = await tgFetch(`${BASE}/getMe`, { signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) return false;
+    const data = await res.json();
+    if (!data?.ok || !data.result?.username) return false;
+    _botUsername = data.result.username;
+    _botId = data.result.id;
+    log("telegram", `Bot identity: @${_botUsername} (id ${_botId}); group mention gate ${REQUIRE_MENTION_IN_GROUPS ? "ON" : "OFF"}`);
+    return true;
+  } catch (e) {
+    log("telegram_warn", `getMe failed: ${e.message}`);
+    return false;
+  }
+}
+
 let chatId = null;
 let _offset  = 0;
 let _polling = false;
@@ -524,6 +618,12 @@ export async function createLiveMessage(title, intro = "Starting...", { thread }
 
 // ─── Long polling ────────────────────────────────────────────────
 async function poll(onMessage) {
+  // The mention gate needs our own username/id; without it every group
+  // message would be dropped as "not mentioned", so block until getMe works.
+  while (_polling && !_botUsername) {
+    if (await fetchBotIdentity()) break;
+    await sleep(5000);
+  }
   while (_polling) {
     try {
       const res = await tgFetch(
@@ -555,7 +655,9 @@ async function poll(onMessage) {
         const msg = update.message;
         if (!msg?.text) continue;
         if (!isAuthorizedIncomingMessage(msg)) continue;
-        await onMessage(msg);
+        const prep = prepareIncomingText(msg);
+        if (!prep.accept) continue; // group chatter not addressed to us
+        await onMessage({ ...msg, text: prep.text });
       }
     } catch (e) {
       if (!e.message?.includes("aborted")) {
