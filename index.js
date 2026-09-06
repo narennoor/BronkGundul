@@ -132,7 +132,7 @@ async function runBriefing() {
   try {
     const briefing = await generateBriefing();
     if (telegramEnabled()) {
-      await sendHTML(briefing, { thread: null }); // cron: always General, ignore reply context
+      await sendHTML(briefing, { thread: TOPICS.report }); // cron: Performance Report topic (General bila env kosong), ignore reply context
     }
     setLastBriefingDate();
   } catch (error) {
@@ -1824,7 +1824,7 @@ async function telegramHandler(msg) {
   if (text === "/briefing") {
     try {
       const briefing = await generateBriefing();
-      await sendHTML(briefing);
+      await sendHTML(briefing, { thread: TOPICS.report ?? undefined }); // ikut laporan cron ke Performance Report; tanpa env → echo ke topic command
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }

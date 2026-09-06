@@ -16,8 +16,9 @@ const ALLOWED_USER_IDS = new Set(
 
 // ─── Forum-topic routing ─────────────────────────────────────────
 // In a group with Topics enabled every send can target a topic via
-// message_thread_id. Cycle activity and cron reports get fixed topics from
-// .env (TELEGRAM_TOPIC_ACTIVITY / TELEGRAM_TOPIC_REPORT); command replies
+// message_thread_id. Cycle activity and reports (cron week/month/year, the
+// daily briefing + /briefing) get fixed topics from .env
+// (TELEGRAM_TOPIC_ACTIVITY / TELEGRAM_TOPIC_REPORT); other command replies
 // echo into the topic the command was typed in (setReplyThread, set per
 // incoming message). Anything unset/null lands in the General topic — and in
 // a plain private/group chat no thread is ever attached, so behavior there
