@@ -296,6 +296,60 @@ test("position rent — a token-free SOL outflow — is not counted as a withdra
   assert.equal(classifyCashFlows([rent], WALLET).withdrawOut, 0);
 });
 
+const DLMM = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
+const DEPOSIT_PROGRAM = "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2";
+
+test("a token-free SOL outflow through a non-DLMM program (Helius UNKNOWN) IS a withdrawal", () => {
+  // shape taken verbatim from tx 79XXehYt… (6 Sep 2026 11:36 UTC): Phantom
+  // DepositNative into a protocol while the daemon was paused — 4.7997 SOL
+  // that the TRANSFER gate alone booked as trading loss in the W36 seal.
+  const deposit = {
+    signature: "prog1", timestamp: 1, type: "UNKNOWN", source: "UNKNOWN", feePayer: WALLET, fee: 80000,
+    instructions: [
+      { programId: "ComputeBudget111111111111111111111111111111", innerInstructions: [] },
+      { programId: DEPOSIT_PROGRAM, innerInstructions: [{ programId: "11111111111111111111111111111111" }] },
+      { programId: "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95", innerInstructions: [] },
+    ],
+    tokenTransfers: [],
+    nativeTransfers: [{ fromUserAccount: WALLET, toUserAccount: OUTSIDE, amount: 4799671211 }],
+  };
+  const r = classifyCashFlows([deposit], WALLET);
+  assert.equal(r.withdrawOut, 4.799671211);
+  assert.equal(r.transfers.length, 1);
+  assert.equal(r.transfers[0].dir, "out");
+  assert.equal(r.transfers[0].via, "program");
+  assert.equal(r.transfers[0].program, DEPOSIT_PROGRAM);
+});
+
+test("a token-free SOL outflow inside a DLMM tx typed UNKNOWN is still NOT a withdrawal", () => {
+  // rent for an empty position account: LBUZ… in the instruction list, no token leg
+  const rent = {
+    signature: "rent2", timestamp: 1, type: "UNKNOWN", source: "UNKNOWN", feePayer: WALLET, fee: 5000,
+    instructions: [{ programId: DLMM, innerInstructions: [{ programId: "11111111111111111111111111111111" }] }],
+    tokenTransfers: [],
+    nativeTransfers: [{ fromUserAccount: WALLET, toUserAccount: POOL_VAULT, amount: 0.109e9 }],
+  };
+  assert.equal(classifyCashFlows([rent], WALLET).withdrawOut, 0);
+  // Helius `source: METEORA` alone is enough even without an instruction list
+  const rent3 = { ...rent, signature: "rent3", source: "METEORA", instructions: [] };
+  assert.equal(classifyCashFlows([rent3], WALLET).withdrawOut, 0);
+});
+
+test("a program outflow to one of our own accounts is NOT a withdrawal; unknown tx shape stays conservative", () => {
+  const OWN_POS = "OwnPosition11111111111111111111111111111111";
+  const toOwn = {
+    signature: "own1", timestamp: 1, type: "UNKNOWN", source: "UNKNOWN", feePayer: WALLET, fee: 5000,
+    instructions: [{ programId: DEPOSIT_PROGRAM, innerInstructions: [] }],
+    tokenTransfers: [],
+    nativeTransfers: [{ fromUserAccount: WALLET, toUserAccount: OWN_POS, amount: 0.1e9 }],
+  };
+  assert.equal(classifyCashFlows([toOwn], WALLET, { ownAccounts: new Set([OWN_POS]) }).withdrawOut, 0);
+  assert.equal(classifyCashFlows([toOwn], WALLET).withdrawOut, 0.1);
+  // no `instructions` array at all (older cached shape) → never guessed as a withdrawal
+  const noShape = { ...toOwn, signature: "noshape", instructions: undefined, nativeTransfers: [{ fromUserAccount: WALLET, toUserAccount: OUTSIDE, amount: 1e9 }] };
+  assert.equal(classifyCashFlows([noShape], WALLET).withdrawOut, 0);
+});
+
 // ── era archive ────────────────────────────────────────────────────
 // `performance` is wiped on every era change, so a wallet that outlives an era
 // has books starting later than its chain history and the difference shows up

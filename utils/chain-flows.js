@@ -173,12 +173,48 @@ export function walletChange(tx, wallet) {
  * entering or leaving.
  *
  * `transfers[]` records every counted funding transfer with its signature and
- * counterparty. The equity ledger persists these per daily window: they are the
+ * counterparty (`via: "program"` marks an outflow that went through a program
+ * rather than a bare system transfer — see isProgramWithdrawal). The equity ledger persists these per daily window: they are the
  * only thing that makes internal-transfer elimination between the group's own
  * wallets deterministic (pair by signature, not by amount + time), and they
  * cannot be reconstructed later without re-walking the chain.
  */
-export function classifyCashFlows(txs, wallet) {
+const DLMM_PROGRAM_ID = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
+
+/** True when any top-level or inner instruction of a Helius enhanced tx hits the Meteora DLMM program. */
+function touchesDlmm(t) {
+  if (t.source === "METEORA") return true;
+  for (const ins of t.instructions || []) {
+    if (ins.programId === DLMM_PROGRAM_ID) return true;
+    for (const inner of ins.innerInstructions || []) if (inner.programId === DLMM_PROGRAM_ID) return true;
+  }
+  return false;
+}
+
+/**
+ * A token-free SOL outflow the wallet signed and paid for, sent through some
+ * program other than Meteora, to an account that is not one of our own. Helius
+ * types these `UNKNOWN`, so the `TRANSFER` gate alone misses them: 6 Sep 2026
+ * 11:36 UTC the operator deposited 4.7997 SOL into a protocol from Phantom
+ * (program 99vQwtBw…, instruction `DepositNative`, Lighthouse guard) while the
+ * daemon was paused, and the ledger booked it as −4.8 SOL of trading loss —
+ * the W36 seal went out with net_rill −6.28 instead of ≈ −1.5.
+ *
+ * Position rent is the outflow this must NOT catch. Every rent payment the
+ * agent makes goes through a DLMM instruction (`INITIALIZE_POSITION` on the
+ * standard path, `createExtendedEmptyPosition` on the retired wide path), so
+ * "does the tx touch LBUZ…" is the decisive test; `ownAccounts` is a second
+ * guard for callers that know their position addresses.
+ */
+function isProgramWithdrawal(t, nt, wallet, ownAccounts) {
+  if (!Array.isArray(t.instructions)) return false; // shape unknown — stay conservative
+  if (touchesDlmm(t)) return false;
+  if (nt.toUserAccount === wallet) return false;
+  if (ownAccounts && ownAccounts.has(nt.toUserAccount)) return false;
+  return true;
+}
+
+export function classifyCashFlows(txs, wallet, { ownAccounts = null } = {}) {
   let gasSol = 0, gasTxn = 0, depositIn = 0, withdrawOut = 0;
   const transfers = [];
   for (const t of txs) {
@@ -197,12 +233,16 @@ export function classifyCashFlows(txs, wallet) {
       // The type check stays as a second gate on the way out: rent paid to open
       // a position account is a token-free SOL outflow too, and it is NOT a
       // withdrawal.
-      if (nt.fromUserAccount === wallet && t.feePayer === wallet && t.type === "TRANSFER") {
-        withdrawOut += nt.amount / 1e9;
-        transfers.push({
-          sig: t.signature, ts: t.timestamp, dir: "out",
-          counterparty: nt.toUserAccount, amount_sol: nt.amount / 1e9,
-        });
+      if (nt.fromUserAccount === wallet && t.feePayer === wallet) {
+        const plain = t.type === "TRANSFER";
+        if (plain || isProgramWithdrawal(t, nt, wallet, ownAccounts)) {
+          withdrawOut += nt.amount / 1e9;
+          transfers.push({
+            sig: t.signature, ts: t.timestamp, dir: "out",
+            counterparty: nt.toUserAccount, amount_sol: nt.amount / 1e9,
+            ...(plain ? {} : { via: "program", program: (t.instructions || []).map((i) => i.programId).find((id) => !/^ComputeBudget/.test(id)) ?? null }),
+          });
+        }
       }
     }
   }
