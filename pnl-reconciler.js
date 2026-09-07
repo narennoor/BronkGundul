@@ -17,6 +17,7 @@ import { log } from "./logger.js";
 import { config } from "./config.js";
 import { evaluateCashMismatch } from "./tools/wallet.js";
 import { writeJsonAtomic } from "./utils/json-store.js";
+import { activeRpcUrl, rpcConnectionConfig } from "./utils/helius-keys.js";
 
 const SETTLE_GRACE_MINUTES = 10;  // closes younger than this are still the close path's job
 const GIVE_UP_HOURS = 72;         // flag entries the API never returned so we stop refetching
@@ -191,10 +192,9 @@ export async function reconcileClosedPnl({ lookbackHours = 48, force = false, dr
 // exit_execution.swap_tx.
 
 function getRpcConnection() {
-  const url = process.env.RPC_URL
-    || (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : null);
+  const url = activeRpcUrl();
   if (!url) throw new Error("RPC_URL (or HELIUS_API_KEY) not set");
-  return new Connection(url, "confirmed");
+  return new Connection(url, rpcConnectionConfig("confirmed"));
 }
 
 async function allSignaturesForAddress(connection, address, { max = 1000 } = {}) {

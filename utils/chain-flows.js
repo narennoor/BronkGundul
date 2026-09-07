@@ -12,6 +12,8 @@
 // seed (equity-seed.js, fase 6) — one full walk per wallet to establish the
 // first anchor, never imported by report code, never run by cron.
 
+import { heliusFetch, heliusKeyRing, activeRpcUrl, rpcFetch } from "./helius-keys.js";
+
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -26,9 +28,13 @@ const MAX_PAGE_DELAY_MS = 2000;
  * exceptional; honor Retry-After when the server sends one.
  */
 export async function fetchTxPage(url, { retries = 5 } = {}) {
+  // `url` may be a (key) => url builder: heliusFetch then swaps to the backup
+  // key on a quota response BEFORE any sleep below — the backoff only runs
+  // once every key in the ring is limited. A plain string never rotates.
+  const makeUrl = typeof url === "function" ? url : null;
   let wait = 1000;
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url);
+    const res = makeUrl ? await heliusFetch(makeUrl) : await fetch(url);
     if (res.ok) return { batch: await res.json(), throttled: attempt > 0 };
     if (res.status !== 429 && res.status < 500) {
       throw new Error(`Helius ${res.status}: ${(await res.text()).slice(0, 120)}`);
@@ -71,12 +77,19 @@ export async function fetchAllTxs(wallet, heliusKey, { stopBeforeSec = null, kno
   let pageDelay = PAGE_DELAY_MS;
   // maxPages 100 (10k txs) covers every recurring caller; only the one-shot
   // seed (equity-seed.js) raises it — its cutoff reaches weeks back.
+  // An explicit key that is not in the ring (a foreign key handed in by a
+  // script) is used as-is; otherwise the ring decides which key is active and
+  // the page fetch rotates to the backup on a 429.
+  const rotate = !heliusKey || heliusKeyRing().includes(heliusKey);
   for (let page = 0; page < maxPages; page++) {
-    const url = new URL(`https://api.helius.xyz/v0/addresses/${wallet}/transactions`);
-    url.searchParams.set("api-key", heliusKey);
-    url.searchParams.set("limit", "100");
-    if (before) url.searchParams.set("before", before);
-    const { batch, throttled } = await fetchTxPage(url);
+    const makeUrl = (key) => {
+      const url = new URL(`https://api.helius.xyz/v0/addresses/${wallet}/transactions`);
+      url.searchParams.set("api-key", key);
+      url.searchParams.set("limit", "100");
+      if (before) url.searchParams.set("before", before);
+      return url.toString();
+    };
+    const { batch, throttled } = await fetchTxPage(rotate ? makeUrl : makeUrl(heliusKey));
     // A throttled page means we are pushing too hard; stay slower for the rest
     // of the walk rather than earning another 429 on the very next request.
     if (throttled) pageDelay = Math.min(pageDelay * 2, MAX_PAGE_DELAY_MS);
@@ -99,7 +112,9 @@ export async function fetchAllTxs(wallet, heliusKey, { stopBeforeSec = null, kno
 }
 
 export async function fetchBalance(wallet) {
-  const res = await fetch(process.env.RPC_URL, {
+  // rpcFetch rotates the api-key on a quota response; a non-Helius RPC_URL
+  // (no api-key param) passes straight through to fetch.
+  const res = await rpcFetch(activeRpcUrl() || process.env.RPC_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBalance", params: [wallet] }),

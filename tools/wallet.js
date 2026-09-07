@@ -8,12 +8,20 @@ import {
 import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
+import { heliusFetch, rpcConnectionKey, activeRpcUrl, rpcConnectionConfig } from "../utils/helius-keys.js";
 
 let _connection = null;
+let _connectionKey = null;
 let _wallet = null;
 
+// Rebuilt whenever the Helius key ring moves to another key (utils/helius-keys.js),
+// so the websocket endpoint follows the fallback as well as the HTTP calls.
 function getConnection() {
-  if (!_connection) _connection = new Connection(process.env.RPC_URL, "confirmed");
+  const key = rpcConnectionKey();
+  if (!_connection || key !== _connectionKey) {
+    _connection = new Connection(activeRpcUrl() || process.env.RPC_URL, rpcConnectionConfig("confirmed"));
+    _connectionKey = key;
+  }
   return _connection;
 }
 
@@ -64,15 +72,14 @@ export async function getWalletBalances() {
     return { wallet: null, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Wallet not configured" };
   }
 
-  const HELIUS_KEY = process.env.HELIUS_API_KEY;
-  if (!HELIUS_KEY) {
+  if (!process.env.HELIUS_API_KEY) {
     log("wallet_error", "HELIUS_API_KEY not set in .env");
     return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Helius API key missing" };
   }
 
   try {
-    const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
-    const res = await fetch(url);
+    // heliusFetch rotates to HELIUS_API_KEY_BACKUP on a 429 / quota response.
+    const res = await heliusFetch((key) => `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${key}`);
     
     if (!res.ok) {
       throw new Error(`Helius API error: ${res.status} ${res.statusText}`);

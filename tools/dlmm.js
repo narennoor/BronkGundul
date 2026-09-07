@@ -13,6 +13,7 @@ import BN from "bn.js";
 import bs58 from "bs58";
 import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { log } from "../logger.js";
+import { rpcConnectionKey, activeRpcUrl, rpcConnectionConfig } from "../utils/helius-keys.js";
 import {
   trackPosition,
   markOutOfRange,
@@ -82,11 +83,18 @@ async function getDLMM() {
 // Avoids crashing on import when WALLET_PRIVATE_KEY is not yet set
 // (e.g. during screening-only tests).
 let _connection = null;
+let _connectionKey = null;
 let _wallet = null;
 
+// The Connection is rebuilt whenever the Helius key ring moves to another key
+// (utils/helius-keys.js): HTTP calls already rotate inside rpcFetch, but the
+// websocket endpoint is fixed at construction, so a fresh Connection is the
+// only way the fallback key also carries confirmTransaction subscriptions.
 function getConnection() {
-  if (!_connection) {
-    _connection = new Connection(process.env.RPC_URL, "confirmed");
+  const key = rpcConnectionKey();
+  if (!_connection || key !== _connectionKey) {
+    _connection = new Connection(activeRpcUrl() || process.env.RPC_URL, rpcConnectionConfig("confirmed"));
+    _connectionKey = key;
   }
   return _connection;
 }
