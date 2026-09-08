@@ -1,7 +1,6 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { getPerformanceSummary } from "./lessons.js";
-import { escapeHtml } from "./telegram.js";
 import { repoPath } from "./repo-root.js";
 
 const STATE_FILE = repoPath("state.json");
@@ -24,14 +23,11 @@ export async function generateBriefing() {
   const totalPnLUsd = perfLast24h.reduce((sum, p) => sum + (p.pnl_usd || 0), 0);
   const totalFeesUsd = perfLast24h.reduce((sum, p) => sum + (p.fees_earned_usd || 0), 0);
 
-  // 3. Lessons Learned
-  const lessonsLast24h = (lessonsData.lessons || []).filter(l => new Date(l.created_at) > last24h);
-
-  // 4. Current State
+  // 3. Current State
   const openPositions = allPositions.filter(p => !p.closed);
   const perfSummary = getPerformanceSummary();
 
-  // 5. Format Message
+  // 4. Format Message
   const lines = [
     "☀️ <b>Morning Briefing</b> (Last 24h)",
     "────────────────",
@@ -45,11 +41,6 @@ export async function generateBriefing() {
     perfLast24h.length > 0
       ? `📈 Win Rate (24h): ${Math.round((perfLast24h.filter(p => p.pnl_usd > 0).length / perfLast24h.length) * 100)}%`
       : "📈 Win Rate (24h): N/A",
-    "",
-    `<b>Lessons Learned:</b>`,
-    lessonsLast24h.length > 0
-      ? lessonsLast24h.map(l => `• ${escapeHtml(l.rule)}`).join("\n")
-      : "• No new lessons recorded overnight.",
     "",
     `<b>Current Portfolio:</b>`,
     `📂 Open Positions: ${openPositions.length}`,
