@@ -79,10 +79,11 @@ menu.
 ### Presets
 
 [presets/bronkgundul.json](presets/bronkgundul.json) is the exact parameter set
-the BronkGundul daemon runs with (era #10, September 2026): 69-bin bid-ask
-ranges, SOL-mode PnL, `stopLossPct: -30`, `hardTakeProfitPct: 10`, trailing TP
-armed at +1.5% with a 1.5% drop, 5 positions × 0.5 SOL, GMGN + Jupiter 5-minute
-trending as screening sources, and per-role models. To run with it:
+the BronkGundul daemon runs with (era #11, from 15 September 2026): 69-bin
+bid-ask ranges, SOL-mode PnL, `stopLossPct: -30`, `hardTakeProfitPct: 10`,
+trailing TP armed at +1.5% with a 1.5% drop, up to 7 positions sized at 30% of
+free balance each (0.5 SOL floor), tokens at least 48h old, GMGN + Jupiter
+5-minute trending as screening sources, and per-role models. To run with it:
 
 ```bash
 cp presets/bronkgundul.json user-config.json
