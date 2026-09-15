@@ -1,14 +1,14 @@
-# CopetGundul
+# BronkGundul
 
 **Autonomous Meteora DLMM liquidity agent for Solana, powered by LLMs.**
 
 > **Upstream attribution** — this repository is developed from
 > [yunus-0x/meridian](https://github.com/yunus-0x/meridian) (Meridian) as its
-> upstream source. CopetGundul is a hardened, personally-operated fork that adds
+> upstream source. BronkGundul is a hardened, personally-operated fork that adds
 > local instrumentation (PnL reconciliation, screening-funnel stats, exit-slippage
 > tracking), extra safety rules, and ops tooling on top of the original agent.
 
-CopetGundul runs continuous screening and management cycles: it scans Meteora
+BronkGundul runs continuous screening and management cycles: it scans Meteora
 DLMM pools against configurable thresholds, deploys SOL into the best candidate,
 monitors open positions (PnL, fees, range), and closes them via deterministic
 exit rules — stop loss, trailing take-profit, out-of-range wait, low yield, and
@@ -32,8 +32,8 @@ max hold. It learns from every closed position and evolves its own thresholds.
 ## Quick start
 
 ```bash
-git clone https://github.com/narennoor/CopetGundul
-cd CopetGundul
+git clone https://github.com/narennoor/BronkGundul
+cd BronkGundul
 npm install
 npm run setup        # interactive wizard — writes .env + user-config.json
 ```
@@ -76,6 +76,31 @@ intervals, per-role LLM models, and trading-hours windows. Change values at
 runtime with `node cli.js config set <key> <value>` or the Telegram `/settings`
 menu.
 
+### Presets
+
+[presets/bronkgundul.json](presets/bronkgundul.json) is the exact parameter set
+the BronkGundul daemon runs with (era #10, September 2026): 69-bin bid-ask
+ranges, SOL-mode PnL, `stopLossPct: -30`, `hardTakeProfitPct: 10`, trailing TP
+armed at +1.5% with a 1.5% drop, 5 positions × 0.5 SOL, GMGN + Jupiter 5-minute
+trending as screening sources, and per-role models. To run with it:
+
+```bash
+cp presets/bronkgundul.json user-config.json
+```
+
+then edit the values you disagree with. Notes:
+
+- The preset has `dryRun: true`. Flip it to `false` only after a paper run.
+- Operator-specific keys were removed (`agentId`, `pnlRpcUrl`,
+  `pnlReportSinceIso`, `pnlReportLlmUsdBaseline`, `reportLedgerRole`). The
+  daemon fills sane defaults for all of them; `pnlReportSinceIso` should be set
+  to the date your own wallet started running the agent.
+- Secrets still go in `.env` (`WALLET_PRIVATE_KEY`, `RPC_URL`,
+  `OPENROUTER_API_KEY`, `HELIUS_API_KEY`; `JUPITER_API_KEY` optional). The
+  preset carries none.
+- These thresholds were tuned on one wallet in one market regime. They are a
+  starting point, not a recommendation — see the disclaimer below.
+
 The engineering manual — architecture, agent roles, safety invariants, state
 files, and how to extend the agent — is in [CLAUDE.md](CLAUDE.md).
 
@@ -86,3 +111,11 @@ trading agent carries real financial risk — you can lose funds. Always start
 with `DRY_RUN=true`, and never deploy more capital than you can afford to lose.
 This is not financial advice, and the authors are not responsible for any
 losses incurred through use of this software.
+
+## License
+
+The upstream project ([yunus-0x/meridian](https://github.com/yunus-0x/meridian))
+ships without a license file, and this fork inherits that status: the code is
+published for reading and personal use, but no open-source license has been
+granted by the upstream author. If you need clarity on redistribution, ask
+upstream first.
