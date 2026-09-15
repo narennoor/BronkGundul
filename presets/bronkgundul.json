@@ -4,7 +4,7 @@
   "llmModel": "openai/gpt-5.4-nano",
   "dryRun": true,
   "deployAmountSol": 0.5,
-  "maxPositions": 5,
+  "maxPositions": 8,
   "minSolToOpen": 0.55,
   "maxDeployAmount": 3,
   "gasReserve": 0.2,
