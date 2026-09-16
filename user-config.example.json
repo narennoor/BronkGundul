@@ -52,6 +52,7 @@
   "blockPvpSymbols": false,
   "maxBotHoldersPct": 30,
   "maxTop10Pct": 60,
+  "maxTransferFeeBps": 0,
   "allowedLaunchpads": [],
   "blockedLaunchpads": [],
   "minTokenAgeHours": null,

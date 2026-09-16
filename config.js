@@ -117,6 +117,7 @@ export const config = {
     botFilterStrikeWindowHours: u.botFilterStrikeWindowHours ?? 12, // rolling window for the strike counter
     botFilterCooldownHours: u.botFilterCooldownHours ?? 6, // mint cooldown once the strike count is hit
     maxTop10Pct:       u.maxTop10Pct       ?? 60,  // max top 10 holders concentration
+    maxTransferFeeBps: u.maxTransferFeeBps !== undefined ? u.maxTransferFeeBps : 0, // Token-2022 transfer fee cap (bps); 0 = only fee-free tokens, null = filter off. Meteora books the token leg gross of this fee (NEARKAT 16 Sep 2026: 300 bps ≈ 6% of the leg round-trip)
     loneCandidateMinDegen: u.loneCandidateMinDegen ?? 50, // degen score that lets a SOLO candidate deploy without a narrative
     allowedLaunchpads: u.allowedLaunchpads ?? [],  // allow-list launchpads, [] = no allow-list
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
@@ -540,6 +541,7 @@ export function reloadScreeningThresholds() {
     if (fresh.avoidPvpSymbols   !== undefined) s.avoidPvpSymbols = fresh.avoidPvpSymbols;
     if (fresh.blockPvpSymbols   !== undefined) s.blockPvpSymbols = fresh.blockPvpSymbols;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
+    if (fresh.maxTransferFeeBps !== undefined) s.maxTransferFeeBps = fresh.maxTransferFeeBps;
     if (fresh.botFilterReentryPct !== undefined) s.botFilterReentryPct = fresh.botFilterReentryPct;
     if (fresh.botFilterStrikeCount != null) s.botFilterStrikeCount = fresh.botFilterStrikeCount;
     if (fresh.botFilterStrikeWindowHours != null) s.botFilterStrikeWindowHours = fresh.botFilterStrikeWindowHours;

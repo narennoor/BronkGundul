@@ -43,6 +43,7 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
+import { getTransferFeeBps, transferFeeRejectReason } from "./transfer-fee.js";
 import { notifyDeploy, notifyClose, notifySwap, sendMessage, TOPICS } from "../telegram.js";
 import { writeJsonAtomic } from "../utils/json-store.js";
 
@@ -190,6 +191,30 @@ async function validateDeployPoolThresholds(args) {
   }
 
   const baseMint = detail?.token_x?.address || detail?.base_token_address || null;
+
+  // Token-2022 transfer fee: Meteora books the token leg gross of it, so a
+  // fee-bearing mint bleeds ~2× the fee off the token leg between the pool
+  // and the swap back to SOL (NEARKAT 16 Sep 2026). Fails CLOSED like every
+  // other gate here — an unreadable mint is not a deployable mint.
+  const maxTransferFeeBps = config.screening.maxTransferFeeBps;
+  if (maxTransferFeeBps != null && baseMint) {
+    const fees = await getTransferFeeBps([baseMint]);
+    const entry = fees.get(baseMint);
+    if (!entry) {
+      return {
+        pass: false,
+        reason: `Could not read the base mint ${baseMint} transfer-fee config before deploy (maxTransferFeeBps=${maxTransferFeeBps}).`,
+      };
+    }
+    const reject = transferFeeRejectReason(entry.bps, maxTransferFeeBps);
+    if (reject) {
+      return {
+        pass: false,
+        reason: `Base token ${baseMint} has a Token-2022 ${reject} — Meteora books withdrawals gross of it, the wallet nets less.`,
+      };
+    }
+  }
+
   const entryMarketData = {
     entry_mcap: numberOrNull(detail?.token_x?.market_cap ?? detail?.base_token_market_cap),
     entry_tvl: tvl,
@@ -456,6 +481,7 @@ const toolMap = {
       botFilterStrikeWindowHours: ["screening", "botFilterStrikeWindowHours"],
       botFilterCooldownHours: ["screening", "botFilterCooldownHours"],
       maxTop10Pct: ["screening", "maxTop10Pct"],
+      maxTransferFeeBps: ["screening", "maxTransferFeeBps"],
       allowedLaunchpads: ["screening", "allowedLaunchpads"],
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
       minTokenAgeHours: ["screening", "minTokenAgeHours"],

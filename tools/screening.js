@@ -9,6 +9,7 @@ import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.
 import { getGmgnTrendingTokens, hasGmgnApiKey } from "./gmgn.js";
 import { getJupTrendingTokens } from "./jupiter-trending.js";
 import { getDexScreenerTokens } from "./dexscreener.js";
+import { getTransferFeeBps, transferFeeRejectReason } from "./transfer-fee.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -957,6 +958,36 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     });
     eligible.splice(0, eligible.length, ...filtered);
     if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via dev blocklist`);
+  }
+
+  // Token-2022 transfer fee — one batched RPC read for the ≤limit survivors.
+  // Meteora books the token leg GROSS of this fee (NEARKAT-SOL 16 Sep 2026:
+  // 300 bps → book +1.90%, wallet +0.74%). `transfer_fee_bps` is attached to
+  // every survivor so the candidate block can show it; an unreadable mint
+  // passes here (logged) and is caught fail-closed by the deploy safety check.
+  if (eligible.length > 0) {
+    const maxTransferFeeBps = config.screening.maxTransferFeeBps;
+    const mints = eligible.map((p) => p.base?.mint).filter(Boolean);
+    let feeByMint = new Map();
+    try {
+      feeByMint = await getTransferFeeBps(mints);
+    } catch (error) {
+      log("screening", `Transfer-fee lookup skipped: ${error.message}`);
+    }
+    const before = eligible.length;
+    const kept = eligible.filter((p) => {
+      const entry = p.base?.mint ? feeByMint.get(p.base.mint) : null;
+      p.transfer_fee_bps = entry?.bps ?? null;
+      p.token_program = entry?.program ?? null;
+      const reason = transferFeeRejectReason(p.transfer_fee_bps, maxTransferFeeBps);
+      if (!reason) return true;
+      log("screening", `Transfer-fee filter: dropped ${p.name} (${p.base?.mint?.slice(0, 8)}) — ${reason}`);
+      pushFilteredReason(filteredOut, p, reason);
+      if (funnelEnabled) killedFailures.push(["maxTransferFeeBps"]);
+      return false;
+    });
+    eligible.splice(0, eligible.length, ...kept);
+    if (eligible.length < before) log("screening", `Transfer-fee filter removed ${before - eligible.length} pool(s)`);
   }
 
   if (config.indicators.enabled && eligible.length > 0) {

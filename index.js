@@ -805,7 +805,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const block = [
         `POOL: ${pool.name} (${pool.pool})`,
         `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
-        `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
+        `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}${pool.transfer_fee_bps != null ? `, transfer_fee=${pool.transfer_fee_bps}bps` : ""}`,
         signalBits.length ? `  signals: ${signalBits.join(", ")}` : null,
         pvpLine,
         `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
@@ -830,6 +830,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           volatility:            pool.volatility            ?? null,
           // Attribution only — not in signal-weights SIGNAL_NAMES, so Darwin ignores these
           token_age_hours:       pool.token_age_hours       ?? null,
+          transfer_fee_bps:      pool.transfer_fee_bps      ?? null,
           gmgn_trending:         Boolean(pool.gmgn_trending),
           gmgn_trending_rank:    pool.gmgn_trending_rank    ?? null,
           gmgn_smart_degen_count: pool.gmgn_smart_degen_count ?? null,
@@ -2449,6 +2450,7 @@ Commands:
       console.log(`  minTokenFeesSol:      ${s.minTokenFeesSol}`);
       console.log(`  maxBotHoldersPct:     ${s.maxBotHoldersPct}`);
       console.log(`  maxTop10Pct:          ${s.maxTop10Pct}`);
+      console.log(`  maxTransferFeeBps:    ${s.maxTransferFeeBps ?? "off"}`);
       console.log(`  timeframe:            ${s.timeframe}`);
       const perf = getPerformanceSummary();
       if (perf) {

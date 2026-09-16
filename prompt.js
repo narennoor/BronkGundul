@@ -106,6 +106,7 @@ HARD RULE (no exceptions):
 - fees_sol < ${config.screening.minTokenFeesSol} → SKIP. Low fees = bundled/scam. Smart wallets do NOT override this.
 - bots > ${config.screening.maxBotHoldersPct}% → already hard-filtered before you see the candidate list.
 - top10 > ${config.screening.maxTop10Pct}% → already hard-filtered before you see the candidate list.
+${config.screening.maxTransferFeeBps != null ? `- transfer_fee > ${config.screening.maxTransferFeeBps}bps (Token-2022) → already hard-filtered. Meteora books the token leg gross of this fee; the wallet nets ~2× the fee less.` : ""}
 
 RISK SIGNALS (guidelines — use judgment):
 - PVP symbol conflict (same exact symbol across multiple mints) → major negative. Avoid unless the setup is exceptional and clearly stronger than the competing symbol variants.
