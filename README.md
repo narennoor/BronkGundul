@@ -76,34 +76,10 @@ intervals, per-role LLM models, and trading-hours windows. Change values at
 runtime with `node cli.js config set <key> <value>` or the Telegram `/settings`
 menu.
 
-### Presets
-
-[presets/bronkgundul.json](presets/bronkgundul.json) is the exact parameter set
-the BronkGundul daemon runs with (era #11, from 15 September 2026): 69-bin
-bid-ask ranges, SOL-mode PnL, `stopLossPct: -30`, `hardTakeProfitPct: 10`,
-trailing TP armed at +1.5% with a 1.5% drop, up to 7 positions sized at 30% of
-free balance each (0.5 SOL floor), tokens at least 48h old, GMGN + Jupiter
-5-minute trending as screening sources, and per-role models. To run with it:
-
-```bash
-cp presets/bronkgundul.json user-config.json
-```
-
-then edit the values you disagree with. Notes:
-
-- The preset has `dryRun: true`. Flip it to `false` only after a paper run.
-- Operator-specific keys were removed (`agentId`, `pnlRpcUrl`,
-  `pnlReportSinceIso`, `pnlReportLlmUsdBaseline`, `reportLedgerRole`). The
-  daemon fills sane defaults for all of them; `pnlReportSinceIso` should be set
-  to the date your own wallet started running the agent.
-- Secrets still go in `.env` (`WALLET_PRIVATE_KEY`, `RPC_URL`,
-  `OPENROUTER_API_KEY`, `HELIUS_API_KEY`; `JUPITER_API_KEY` optional). The
-  preset carries none.
-- These thresholds were tuned on one wallet in one market regime. They are a
-  starting point, not a recommendation — see the disclaimer below.
-
-The engineering manual — architecture, agent roles, safety invariants, state
-files, and how to extend the agent — is in [CLAUDE.md](CLAUDE.md).
+Secrets go in `.env` (`WALLET_PRIVATE_KEY`, `RPC_URL`, `OPENROUTER_API_KEY`,
+`HELIUS_API_KEY`; `JUPITER_API_KEY` optional), never in `user-config.json`.
+Start from the example with `dryRun: true` and flip it to `false` only after
+a paper run. The operator's own tuned parameter set is kept private.
 
 ## Disclaimer
 

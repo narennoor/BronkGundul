@@ -20,6 +20,7 @@ gmgn-config.json
 
 # Runtime state (position tracking, lessons — user-specific)
 state.json
+state-closed.json
 lessons.json
 smart-wallets.json
 pool-memory.json
@@ -53,3 +54,8 @@ discord-signals.json
 # Claude Code runtime lock
 .claude/scheduled_tasks.lock
 ops/
+
+# Privat operator: parameter strategi dan catatan kerja Claude tidak ikut ke GitHub publik
+presets/
+CLAUDE.md
+.claude/
