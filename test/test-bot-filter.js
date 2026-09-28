@@ -9,8 +9,8 @@ import fs from "fs";
 
 process.env.BOT_FILTER_STORE = path.join(os.tmpdir(), `bot-filter-test-${process.pid}.json`);
 
-const { evaluateBotFilter, isBotFilterMintOnCooldown, getBotFilterSummary } = await import("../bot-filter.js");
-const { config } = await import("../config.js");
+const { evaluateBotFilter, isBotFilterMintOnCooldown, getBotFilterSummary } = await import("../screening/bot-filter.js");
+const { config } = await import("../core/config.js");
 
 config.screening.maxBotHoldersPct = 33;
 config.screening.botFilterReentryPct = 25;

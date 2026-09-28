@@ -13,7 +13,7 @@
 
 import { Connection, PublicKey } from "@solana/web3.js";
 import { activeRpcUrl, rpcConnectionConfig, rpcConnectionKey } from "../utils/helius-keys.js";
-import { log } from "../logger.js";
+import { log } from "../core/logger.js";
 
 export const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 

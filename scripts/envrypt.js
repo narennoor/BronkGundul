@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { encryptEnvRaw, envryptDecrypt } from "../envcrypt.js";
+import { encryptEnvRaw, envryptDecrypt } from "../core/envcrypt.js";
 
 function usage() {
   console.log(`Usage:

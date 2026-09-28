@@ -1,16 +1,16 @@
-import "./envcrypt.js";
+import "./core/envcrypt.js";
 import cron from "node-cron";
 import readline from "readline";
 import path from "path";
 import { fileURLToPath } from "url";
-import { agentLoop } from "./agent.js";
-import { log } from "./logger.js";
+import { agentLoop } from "./core/agent.js";
+import { log } from "./core/logger.js";
 import { getMyPositions, closePosition, getActiveBin, countablePositions } from "./tools/dlmm.js";
 import { getWalletBalances, getSolBalance } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
-import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
-import { reconcileClosedPnl } from "./pnl-reconciler.js";
+import { config, reloadScreeningThresholds, computeDeployAmount } from "./core/config.js";
+import { evolveThresholds, getPerformanceSummary } from "./learning/lessons.js";
+import { reconcileClosedPnl } from "./finance/pnl-reconciler.js";
 import { executeTool, registerCronRestarter, sweepLeftoverTokens } from "./tools/executor.js";
 import {
   startPolling,
@@ -28,24 +28,24 @@ import {
   createLiveMessage,
   TOPICS,
   setReplyThread,
-} from "./telegram.js";
-import { generateBriefing } from "./briefing.js";
-import { takeSnapshot, healGap, loadSnapshots, ledgerWalletAddress } from "./equity-snapshot.js";
-import { ensurePeriodSealed, formatFinancialReport, buildYtdReport, lastClosedPeriodId, periodBounds } from "./financial-report.js";
-import { buildReportXlsx, buildGroupReportXlsx } from "./financial-xlsx.js";
-import { consolidatePeriod } from "./consolidate.js";
-import { loadRegistry, resolveRegistryPath } from "./ledger-registry.js";
-import { readLedger } from "./ledger-transport.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, archiveClosedPositions } from "./state.js";
-import { getActiveStrategy } from "./strategy-library.js";
-import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
-import { evaluateBotFilter } from "./bot-filter.js";
-import { checkSmartWalletsOnPool } from "./smart-wallets.js";
+} from "./notify/telegram.js";
+import { generateBriefing } from "./notify/briefing.js";
+import { takeSnapshot, healGap, loadSnapshots, ledgerWalletAddress } from "./finance/equity-snapshot.js";
+import { ensurePeriodSealed, formatFinancialReport, buildYtdReport, lastClosedPeriodId, periodBounds } from "./finance/financial-report.js";
+import { buildReportXlsx, buildGroupReportXlsx } from "./finance/financial-xlsx.js";
+import { consolidatePeriod } from "./finance/consolidate.js";
+import { loadRegistry, resolveRegistryPath } from "./finance/ledger-registry.js";
+import { readLedger } from "./finance/ledger-transport.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, archiveClosedPositions } from "./core/state.js";
+import { getActiveStrategy } from "./learning/strategy-library.js";
+import { recordPositionSnapshot, recallForPool, addPoolNote } from "./learning/pool-memory.js";
+import { evaluateBotFilter } from "./screening/bot-filter.js";
+import { checkSmartWalletsOnPool } from "./screening/smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
-import { stageSignals } from "./signal-tracker.js";
-import { getWeightsSummary } from "./signal-weights.js";
-import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
-import { appendDecision } from "./decision-log.js";
+import { stageSignals } from "./screening/signal-tracker.js";
+import { getWeightsSummary } from "./learning/signal-weights.js";
+import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./learning/hivemind.js";
+import { appendDecision } from "./core/decision-log.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
@@ -1936,7 +1936,7 @@ async function telegramHandler(msg) {
   if (text === "/pnl") {
     try {
       await sendMessage("⏳ Menghitung PnL on-chain (±30 detik)...").catch(() => {});
-      const { computePnlReport, formatPnlReport } = await import("./pnl-report.js");
+      const { computePnlReport, formatPnlReport } = await import("./finance/pnl-report.js");
       const report = await computePnlReport();
       await sendHTML(formatPnlReport(report, { html: true }));
     } catch (e) {
@@ -2428,7 +2428,7 @@ Commands:
 
     if (input === "/pnl") {
       await runBusy(async () => {
-        const { computePnlReport, formatPnlReport } = await import("./pnl-report.js");
+        const { computePnlReport, formatPnlReport } = await import("./finance/pnl-report.js");
         const report = await computePnlReport();
         console.log(`\n${formatPnlReport(report)}\n`);
       });

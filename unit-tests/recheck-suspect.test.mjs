@@ -13,7 +13,7 @@ import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { isCashSuspect } = await import("../pnl-reconciler.js");
+const { isCashSuspect } = await import("../finance/pnl-reconciler.js");
 
 test("a normal cycle with the ~0.109 SOL rent refund is NOT suspect", () => {
   // Jimothy-SOL, 12 Aug 2026 — a perfectly healthy close: cash_complete on the

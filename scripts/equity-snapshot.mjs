@@ -7,11 +7,11 @@
 // Point MERIDIAN_STATE_DIR at the daemon's data dir when running from a
 // worktree, e.g.:
 //   MERIDIAN_STATE_DIR=$HOME/BronkGundul node scripts/equity-snapshot.mjs
-import { loadEnv } from "../envcrypt.js";
+import { loadEnv } from "../core/envcrypt.js";
 
 loadEnv();
 
-const { takeSnapshot } = await import("../equity-snapshot.js");
+const { takeSnapshot } = await import("../finance/equity-snapshot.js");
 
 try {
   const res = await takeSnapshot();

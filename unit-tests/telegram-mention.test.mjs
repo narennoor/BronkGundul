@@ -11,7 +11,7 @@ import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { prepareIncomingText } = await import("../telegram.js");
+const { prepareIncomingText } = await import("../notify/telegram.js");
 
 const BOT = { botUsername: "MeridianBot", botId: 777, requireMention: true };
 const group = (text, extra = {}) => ({ chat: { type: "supergroup", id: -100 }, from: { id: 1 }, text, ...extra });

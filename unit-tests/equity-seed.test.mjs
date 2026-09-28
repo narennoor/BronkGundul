@@ -71,9 +71,9 @@ globalThis.fetch = async (url, opts) => {
   throw new Error(`unexpected fetch: ${u}`);
 };
 
-const { seedLedger, verifySealChain, buildPrincipalIndex, sealClosedPeriodsFrom } = await import("../equity-seed.js");
-const { loadSnapshots, loadPeriods } = await import("../equity-snapshot.js");
-const { toPeriodsCsv, PERIODS_CSV_COLUMNS } = await import("../financial-csv.js");
+const { seedLedger, verifySealChain, buildPrincipalIndex, sealClosedPeriodsFrom } = await import("../finance/equity-seed.js");
+const { loadSnapshots, loadPeriods } = await import("../finance/equity-snapshot.js");
+const { toPeriodsCsv, PERIODS_CSV_COLUMNS } = await import("../finance/financial-csv.js");
 
 // ── sejarah tx sintetis, hand-computable (ts-desc utk Helius) ────────
 // funding +10 (20 Jul) · gas-trade pra-cutoff (25 Jul) · trade harian +0.004

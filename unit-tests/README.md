@@ -10,8 +10,8 @@ Everything here runs fully isolated from the live data files:
 - no on-chain transaction is ever built against a real signer
 - every test file's **first import is `./_setup.mjs`**, which points
   `MERIDIAN_STATE_DIR` at a fresh temp directory before any production module
-  loads. All `repoPath()` consumers (`state.js`, `lessons.js`, `pool-memory.js`,
-  `signal-weights.js`, `config.js`, `logger.js`, …) read and write there, so the
+  loads. All `repoPath()` consumers (`core/state.js`, `learning/lessons.js`, `learning/pool-memory.js`,
+  `learning/signal-weights.js`, `core/config.js`, `core/logger.js`, …) read and write there, so the
   live `state.json` & friends are **never opened** — the suite is safe to run
   while the daemon is up. (The old byte-snapshot/restore of the real files raced
   the daemon's load+save loop — 18 Aug 2026: 22 phantom UNITTEST positions

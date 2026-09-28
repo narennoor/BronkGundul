@@ -13,7 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const { resolveReportCutoff, applyCutoff, formatPnlReport, classifyCashFlows } =
-  await import("../pnl-report.js");
+  await import("../finance/pnl-report.js");
 
 const WALLET = "UNITTESTwa11et1111111111111111111111111111111";
 const CUTOFF = resolveReportCutoff("2026-07-21T00:00:00Z");

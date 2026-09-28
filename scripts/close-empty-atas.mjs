@@ -19,7 +19,7 @@ import {
   Connection, Keypair, PublicKey, Transaction, TransactionInstruction,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
-import { loadEnv } from "../envcrypt.js";
+import { loadEnv } from "../core/envcrypt.js";
 import { repoPath } from "../repo-root.js";
 
 loadEnv();

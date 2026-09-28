@@ -28,10 +28,10 @@ import bs58 from "bs58";
 // datapi URL (the fetch itself is injected below). No funds, no chain.
 process.env.WALLET_PRIVATE_KEY ||= bs58.encode(Keypair.generate().secretKey);
 
-const { trackPosition, syncOpenPositions, getTrackedPosition } = await import("../state.js");
+const { trackPosition, syncOpenPositions, getTrackedPosition } = await import("../core/state.js");
 const { bookkeepSyncAutoClosed } = await import("../tools/dlmm.js");
-const { hasPerformanceRecord } = await import("../lessons.js");
-const { config } = await import("../config.js");
+const { hasPerformanceRecord } = await import("../learning/lessons.js");
+const { config } = await import("../core/config.js");
 
 // Keep the test run from pushing synthetic performance events to the real
 // HiveMind — isHiveMindEnabled() reads this live.

@@ -37,11 +37,11 @@ globalThis.fetch = async (url) => {
   throw new Error(`zero-walk violated: fetch(${String(url).slice(0, 80)})`);
 };
 
-const { sealPeriod, snapshotIdFor } = await import("../equity-snapshot.js");
-const { buildYtdReport } = await import("../financial-report.js");
-const { PERIODS_CSV_COLUMNS, CLOSES_CSV_COLUMNS, CURVE_CSV_COLUMNS } = await import("../financial-csv.js");
+const { sealPeriod, snapshotIdFor } = await import("../finance/equity-snapshot.js");
+const { buildYtdReport } = await import("../finance/financial-report.js");
+const { PERIODS_CSV_COLUMNS, CLOSES_CSV_COLUMNS, CURVE_CSV_COLUMNS } = await import("../finance/financial-csv.js");
 const { buildXlsx, S } = await import("../utils/xlsx.js");
-const { periodsSheetRows, closesSheetRows, curveSheetRows, buildReportXlsx } = await import("../financial-xlsx.js");
+const { periodsSheetRows, closesSheetRows, curveSheetRows, buildReportXlsx } = await import("../finance/financial-xlsx.js");
 const { writeJsonAtomic } = await import("../utils/json-store.js");
 
 const DAY = 24 * 3600 * 1000;

@@ -13,7 +13,7 @@ import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { trackPosition, confirmPeak, updatePnlAndCheckExits, getTrailingTrace } = await import("../state.js");
+const { trackPosition, confirmPeak, updatePnlAndCheckExits, getTrailingTrace } = await import("../core/state.js");
 
 // Era #9 management config, trimmed to what the exit rules read.
 const ERA9 = {

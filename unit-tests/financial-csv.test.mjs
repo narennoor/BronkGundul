@@ -38,8 +38,8 @@ globalThis.fetch = async (url) => {
   throw new Error(`zero-walk violated: fetch(${String(url).slice(0, 80)})`);
 };
 
-const { sealPeriod, snapshotIdFor } = await import("../equity-snapshot.js");
-const { buildYtdReport } = await import("../financial-report.js");
+const { sealPeriod, snapshotIdFor } = await import("../finance/equity-snapshot.js");
+const { buildYtdReport } = await import("../finance/financial-report.js");
 const {
   PERIODS_CSV_COLUMNS,
   CLOSES_CSV_COLUMNS,
@@ -49,8 +49,8 @@ const {
   closesInWindow,
   toCurveCsv,
   buildReportCsvs,
-} = await import("../financial-csv.js");
-const { config } = await import("../config.js");
+} = await import("../finance/financial-csv.js");
+const { config } = await import("../core/config.js");
 const { writeJsonAtomic } = await import("../utils/json-store.js");
 
 const DAY = 24 * 3600 * 1000;

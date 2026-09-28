@@ -11,8 +11,8 @@ import {
 } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
-import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW } from "../config.js";
-import { log } from "../logger.js";
+import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW } from "../core/config.js";
+import { log } from "../core/logger.js";
 import { rpcConnectionKey, activeRpcUrl, rpcConnectionConfig } from "../utils/helius-keys.js";
 import {
   trackPosition,
@@ -27,13 +27,13 @@ import {
   getTrackedPositions,
   minutesOutOfRange,
   syncOpenPositions,
-} from "../state.js";
-import { recordPerformance, hasPerformanceRecord } from "../lessons.js";
-import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
+} from "../core/state.js";
+import { recordPerformance, hasPerformanceRecord } from "../learning/lessons.js";
+import { isBaseMintOnCooldown, isPoolOnCooldown } from "../learning/pool-memory.js";
 import { getWalletBalances, getSolBalance, normalizeMint } from "./wallet.js";
-import { appendDecision } from "../decision-log.js";
+import { appendDecision } from "../core/decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
-import { getAndClearStagedSignals, peekStagedSignals } from "../signal-tracker.js";
+import { getAndClearStagedSignals, peekStagedSignals } from "../screening/signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool, isDepositPartiallyIndexed } from "./pnl.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
@@ -1815,7 +1815,7 @@ export async function bookkeepSyncAutoClosed(autoClosed, opts = {}) {
   const delayMs = Number(opts.delayMs ?? SYNC_CLOSE_BOOKKEEP_DELAY_MS);
   const fetchImpl = opts.fetchImpl || fetch;
   const recheck = opts.recheck || (async (positions) => {
-    const { recheckCash } = await import("../pnl-reconciler.js");
+    const { recheckCash } = await import("../finance/pnl-reconciler.js");
     return recheckCash({ positions });
   });
 

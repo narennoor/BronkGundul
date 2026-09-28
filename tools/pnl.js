@@ -1,12 +1,12 @@
 import { Connection, PublicKey } from "@solana/web3.js";
-import { config } from "../config.js";
-import { log } from "../logger.js";
+import { config } from "../core/config.js";
+import { log } from "../core/logger.js";
 import {
   getTrackedPosition,
   markOutOfRange,
   markInRange,
   minutesOutOfRange,
-} from "../state.js";
+} from "../core/state.js";
 
 // ─── Public-infra PnL engine ───────────────────────────────────
 // Live position value (current liquidity + claimable fees) is read ON-CHAIN

@@ -1,4 +1,4 @@
-import { config } from "../config.js";
+import { config } from "../core/config.js";
 import { getGmgnTokenFees, hasGmgnApiKey } from "./gmgn.js";
 
 const DATAPI_BASE = "https://datapi.jup.ag/v1";
@@ -123,7 +123,7 @@ export async function getTokenHolders({ mint, limit = 20 }) {
 
   // ─── Smart Wallet / KOL Cross-reference ──────────────────────
   // Use targeted holders endpoint — only returns matching wallets, no noise
-  const { listSmartWallets } = await import("../smart-wallets.js");
+  const { listSmartWallets } = await import("../screening/smart-wallets.js");
   const { wallets: smartWallets } = listSmartWallets();
   let smartWalletsHolding = [];
 

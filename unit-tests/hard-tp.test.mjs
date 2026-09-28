@@ -16,7 +16,7 @@ import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { trackPosition, confirmPeak, updatePnlAndCheckExits, registerExitSignal } = await import("../state.js");
+const { trackPosition, confirmPeak, updatePnlAndCheckExits, registerExitSignal } = await import("../core/state.js");
 
 // Era #10 management config, trimmed to what the exit rules read.
 const ERA10 = {

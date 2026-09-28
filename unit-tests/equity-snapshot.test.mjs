@@ -43,7 +43,7 @@ const {
   dayBoundaryUtc,
   snapshotIdFor,
   resolveLedgerDir,
-} = await import("../equity-snapshot.js");
+} = await import("../finance/equity-snapshot.js");
 const { writeJsonAtomic, readJsonStore } = await import("../utils/json-store.js");
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";

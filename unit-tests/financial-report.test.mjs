@@ -48,8 +48,8 @@ const {
   lastClosedPeriodId,
   isoWeekIdFor,
   snapshotIdFor,
-} = await import("../equity-snapshot.js");
-const { buildPeriodReport, ensurePeriodSealed, formatFinancialReport } = await import("../financial-report.js");
+} = await import("../finance/equity-snapshot.js");
+const { buildPeriodReport, ensurePeriodSealed, formatFinancialReport } = await import("../finance/financial-report.js");
 const { writeJsonAtomic, readJsonStore } = await import("../utils/json-store.js");
 
 const DAY = 24 * 3600 * 1000;

@@ -10,7 +10,7 @@
 // terjadi persis di tengah rotasi menimpa reset — makanya ada verifikasi
 // (tunggu > interval opportunity-poll, baca ulang, ulangi maksimal 2x).
 import { setTimeout as sleep } from "timers/promises";
-import { getFunnelStats, rotateFunnelStats, summarizeFunnel } from "../funnel-stats.js";
+import { getFunnelStats, rotateFunnelStats, summarizeFunnel } from "../screening/funnel-stats.js";
 
 const label = process.argv[2];
 

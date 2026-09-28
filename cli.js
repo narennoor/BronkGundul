@@ -4,7 +4,7 @@
  * Direct tool invocation with JSON output. Agent-native.
  */
 
-import { loadEnv } from "./envcrypt.js";
+import { loadEnv } from "./core/envcrypt.js";
 import { parseArgs } from "util";
 import os from "os";
 import fs from "fs";
@@ -288,7 +288,7 @@ switch (subcommand) {
     const positionAddress = flags.position || posAddr;
     if (!positionAddress) die("Usage: meridian pnl <position_address>");
 
-    const { getTrackedPosition } = await import("./state.js");
+    const { getTrackedPosition } = await import("./core/state.js");
     const { getPositionPnl, getMyPositions } = await import("./tools/dlmm.js");
 
     let poolAddress;
@@ -315,8 +315,8 @@ switch (subcommand) {
     const { getTopCandidates } = await import("./tools/screening.js");
     const { getActiveBin } = await import("./tools/dlmm.js");
     const { getTokenInfo, getTokenHolders, getTokenNarrative } = await import("./tools/token.js");
-    const { checkSmartWalletsOnPool } = await import("./smart-wallets.js");
-    const { recallForPool } = await import("./pool-memory.js");
+    const { checkSmartWalletsOnPool } = await import("./screening/smart-wallets.js");
+    const { recallForPool } = await import("./learning/pool-memory.js");
 
     const limit = parseInt(flags.limit || "5");
     const raw = await getTopCandidates({ limit });
@@ -506,7 +506,7 @@ switch (subcommand) {
   // ── config ───────────────────────────────────────────────────────
   case "config": {
     if (sub2 === "get" || !sub2) {
-      const { config } = await import("./config.js");
+      const { config } = await import("./core/config.js");
       out(config);
     } else if (sub2 === "set") {
       const key = argv.filter(a => !a.startsWith("-"))[2];
@@ -533,7 +533,7 @@ switch (subcommand) {
 
   // ── hive (pull + review gate) ────────────────────────────────────
   case "hive": {
-    const hive = await import("./hivemind.js");
+    const hive = await import("./learning/hivemind.js");
     if (sub2 === "pull") {
       const pulled = await hive.pullHiveMindLessons(flags.limit ? parseInt(flags.limit) : 12);
       if (pulled === null) die("HiveMind disabled or pull failed (check logs)");
@@ -568,11 +568,11 @@ switch (subcommand) {
     if (sub2 === "add") {
       const text = argv.filter(a => !a.startsWith("-")).slice(2).join(" ");
       if (!text) die("Usage: meridian lessons add <text>");
-      const { addLesson } = await import("./lessons.js");
+      const { addLesson } = await import("./learning/lessons.js");
       addLesson(text, [], { pinned: false, role: null });
       out({ saved: true, rule: text, outcome: "manual", role: null });
     } else {
-      const { listLessons } = await import("./lessons.js");
+      const { listLessons } = await import("./learning/lessons.js");
       const limit = flags.limit ? parseInt(flags.limit) : 50;
       out(listLessons({ limit }));
     }
@@ -582,15 +582,15 @@ switch (subcommand) {
   // ── pool-memory ──────────────────────────────────────────────────
   case "pool-memory": {
     if (!flags.pool) die("Usage: meridian pool-memory --pool <addr>");
-    const { getPoolMemory } = await import("./pool-memory.js");
+    const { getPoolMemory } = await import("./learning/pool-memory.js");
     out(getPoolMemory({ pool_address: flags.pool }));
     break;
   }
 
   // ── evolve ───────────────────────────────────────────────────────
   case "evolve": {
-    const { config } = await import("./config.js");
-    const { evolveThresholds } = await import("./lessons.js");
+    const { config } = await import("./core/config.js");
+    const { evolveThresholds } = await import("./learning/lessons.js");
     const fs2 = await import("fs");
     const lessonsFile = "./lessons.json";
     let perfData = [];
@@ -611,10 +611,10 @@ switch (subcommand) {
     if (sub2 === "add") {
       if (!flags.mint) die("Usage: meridian blacklist add --mint <addr> --reason <text>");
       if (!flags.reason) die("--reason is required");
-      const { addToBlacklist } = await import("./token-blacklist.js");
+      const { addToBlacklist } = await import("./screening/token-blacklist.js");
       out(addToBlacklist({ mint: flags.mint, reason: flags.reason }));
     } else if (sub2 === "list" || !sub2) {
-      const { listBlacklist } = await import("./token-blacklist.js");
+      const { listBlacklist } = await import("./screening/token-blacklist.js");
       out(listBlacklist());
     } else {
       die(`Unknown blacklist subcommand: ${sub2}. Use: add, list`);
@@ -624,7 +624,7 @@ switch (subcommand) {
 
   // ── performance ──────────────────────────────────────────────────
   case "performance": {
-    const { getPerformanceHistory, getPerformanceSummary } = await import("./lessons.js");
+    const { getPerformanceHistory, getPerformanceSummary } = await import("./learning/lessons.js");
     const limit = flags.limit ? parseInt(flags.limit) : 200;
     const history = getPerformanceHistory({ hours: 999999, limit });
     const summary = getPerformanceSummary();

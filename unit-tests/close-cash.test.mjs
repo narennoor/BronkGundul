@@ -12,7 +12,7 @@ import "./_setup.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { trackPosition, recordCloseTxAttempt, getCloseTxAttempts } = await import("../state.js");
+const { trackPosition, recordCloseTxAttempt, getCloseTxAttempts } = await import("../core/state.js");
 const { evaluateCashMismatch, dedupeCycleBuckets } = await import("../tools/wallet.js");
 
 const POS = "UNITTESTclose1111111111111111111111111111111";

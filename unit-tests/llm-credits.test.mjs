@@ -35,7 +35,7 @@ globalThis.fetch = async (url) => {
   throw new Error(`zero-network violated: fetch(${String(url).slice(0, 80)})`);
 };
 
-const { llmCreditsMemo, formatFinancialReport } = await import("../financial-report.js");
+const { llmCreditsMemo, formatFinancialReport } = await import("../finance/financial-report.js");
 const { fetchLlmCredits } = await import("../utils/chain-flows.js");
 const { writeJsonAtomic } = await import("../utils/json-store.js");
 

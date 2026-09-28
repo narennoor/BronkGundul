@@ -19,7 +19,7 @@ const {
   trackPosition, recordClose, recordCloseTxAttempt, getCloseTxAttempts,
   getTrackedPosition, getTrackedPositions, getAllPositionsMap, getStateSummary,
   getTrailingTrace, syncOpenPositions, archiveClosedPositions,
-} = await import("../state.js");
+} = await import("../core/state.js");
 
 const readState = () => JSON.parse(fs.readFileSync(statePath("state.json"), "utf8"));
 const readClosed = () => JSON.parse(fs.readFileSync(statePath("state-closed.json"), "utf8"));

@@ -13,22 +13,22 @@ import {
 } from "./dlmm.js";
 import { getWalletBalances, getSolBalance, swapToken, normalizeMint, reconcileCycleCash } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
-import { addLesson, attachExitExecution, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceEntry, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction, getTrackedPosition } from "../state.js";
+import { addLesson, attachExitExecution, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceEntry, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../learning/lessons.js";
+import { setPositionInstruction, getTrackedPosition } from "../core/state.js";
 
-import { getPoolMemory, addPoolNote } from "../pool-memory.js";
-import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
-import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-blacklist.js";
-import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
-import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
+import { getPoolMemory, addPoolNote } from "../learning/pool-memory.js";
+import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../learning/strategy-library.js";
+import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../screening/token-blacklist.js";
+import { blockDev, unblockDev, listBlockedDevs } from "../screening/dev-blocklist.js";
+import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../screening/smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
-import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
-import { getRecentDecisions } from "../decision-log.js";
-import { resolveReportCutoff } from "../pnl-report.js";
+import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../core/config.js";
+import { getRecentDecisions } from "../core/decision-log.js";
+import { resolveReportCutoff } from "../finance/pnl-report.js";
 import fs from "fs";
 import { execSync } from "child_process";
 import { REPO_ROOT, repoPath } from "../repo-root.js";
-import { normalizeTimeframe, scaleScreeningToTimeframe } from "../screening-scales.js";
+import { normalizeTimeframe, scaleScreeningToTimeframe } from "../screening/screening-scales.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
@@ -42,9 +42,9 @@ const TIMEFRAME_MINUTES = {
   "12h": 720,
   "24h": 1440,
 };
-import { log, logAction } from "../logger.js";
+import { log, logAction } from "../core/logger.js";
 import { getTransferFeeBps, transferFeeRejectReason } from "./transfer-fee.js";
-import { notifyDeploy, notifyClose, notifySwap, sendMessage, TOPICS } from "../telegram.js";
+import { notifyDeploy, notifyClose, notifySwap, sendMessage, TOPICS } from "../notify/telegram.js";
 import { writeJsonAtomic } from "../utils/json-store.js";
 
 function numberOrNull(value) {

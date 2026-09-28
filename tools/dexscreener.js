@@ -1,5 +1,5 @@
-import { config } from "../config.js";
-import { log } from "../logger.js";
+import { config } from "../core/config.js";
+import { log } from "../core/logger.js";
 
 // ─── DexScreener boosted tokens (screening source) ──────────────
 // GET https://api.dexscreener.com/token-boosts/{top,latest}/v1 — public, no

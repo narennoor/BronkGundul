@@ -51,13 +51,13 @@ const I = kp("IWal");
 const J = kp("JWal");
 process.env.WALLET_PRIVATE_KEY = A.secret; // "daemon" suite = wallet A
 
-const { consolidatePeriod, eliminateInternalTransfers, dedupLlmCost } = await import("../consolidate.js");
+const { consolidatePeriod, eliminateInternalTransfers, dedupLlmCost } = await import("../finance/consolidate.js");
 const { loadRegistry, activeWalletsAt, walletsActiveIn, isOwnWallet, resolveRegistryPath } =
-  await import("../ledger-registry.js");
-const { readLedger } = await import("../ledger-transport.js");
-const { snapshotIdFor, isoWeekIdFor, computePeriodRecord } = await import("../equity-snapshot.js");
-const { formatFinancialReport } = await import("../financial-report.js");
-const { buildGroupReportCsvs, PERIODS_CSV_COLUMNS, CURVE_CSV_COLUMNS } = await import("../financial-csv.js");
+  await import("../finance/ledger-registry.js");
+const { readLedger } = await import("../finance/ledger-transport.js");
+const { snapshotIdFor, isoWeekIdFor, computePeriodRecord } = await import("../finance/equity-snapshot.js");
+const { formatFinancialReport } = await import("../finance/financial-report.js");
+const { buildGroupReportCsvs, PERIODS_CSV_COLUMNS, CURVE_CSV_COLUMNS } = await import("../finance/financial-csv.js");
 const { writeJsonAtomic } = await import("../utils/json-store.js");
 
 const DAY = 24 * 3600 * 1000;

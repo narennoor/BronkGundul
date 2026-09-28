@@ -13,7 +13,7 @@
 //     the window that the live path's own verdict (evaluateCashMismatch — rent
 //     refund allowed) flags, plus anything still cash_complete:false; --all
 //     recomputes the window regardless.
-import { loadEnv } from "../envcrypt.js";
+import { loadEnv } from "../core/envcrypt.js";
 
 loadEnv();
 
@@ -27,7 +27,7 @@ const force = argv.includes("--force");
 const dryRun = argv.includes("--dry-run");
 
 if (argv.includes("--recheck-cash")) {
-  const { recheckCash } = await import("../pnl-reconciler.js");
+  const { recheckCash } = await import("../finance/pnl-reconciler.js");
   const positions = (flagValue("--positions") || "").split(",").map((s) => s.trim()).filter(Boolean);
   try {
     const result = await recheckCash({ positions, lookbackHours, dryRun, all: argv.includes("--all") });
@@ -47,7 +47,7 @@ if (argv.includes("--recheck-cash")) {
     process.exit(1);
   }
 } else {
-  const { reconcileClosedPnl } = await import("../pnl-reconciler.js");
+  const { reconcileClosedPnl } = await import("../finance/pnl-reconciler.js");
   try {
     const result = await reconcileClosedPnl({ lookbackHours, force, dryRun });
     console.log(`Checked ${result.checked} close(s), patched ${result.patched}, flagged ${result.flagged}.`);

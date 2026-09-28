@@ -9,7 +9,7 @@
 // (scope=wallet butuh WALLET_PRIVATE_KEY dari .env untuk memilih ledger-nya;
 // scope=group cukup registry).
 
-import { loadEnv } from "../envcrypt.js";
+import { loadEnv } from "../core/envcrypt.js";
 
 loadEnv();
 
@@ -29,17 +29,17 @@ if (!["week", "month", "year", "ytd"].includes(kind) || !["group", "wallet"].inc
 
 try {
   const { formatFinancialReport, buildPeriodReport, buildYtdReport, lastClosedPeriodId } =
-    await import("../financial-report.js");
+    await import("../finance/financial-report.js");
 
   if (scope === "group") {
-    const { consolidatePeriod } = await import("../consolidate.js");
+    const { consolidatePeriod } = await import("../finance/consolidate.js");
     const id = args.id ?? (kind === "ytd" ? String(new Date().getUTCFullYear()) : lastClosedPeriodId(kind));
     const record = consolidatePeriod({ kind, id });
     console.log(formatFinancialReport({ wallet: record.group_name ?? "", record }));
   } else if (kind === "ytd") {
     const year = Number(args.id ?? new Date().getUTCFullYear());
     const record = buildYtdReport({ year });
-    const { ledgerWalletAddress } = await import("../equity-snapshot.js");
+    const { ledgerWalletAddress } = await import("../finance/equity-snapshot.js");
     console.log(formatFinancialReport({ wallet: ledgerWalletAddress(), record }));
   } else {
     const id = args.id ?? lastClosedPeriodId(kind);

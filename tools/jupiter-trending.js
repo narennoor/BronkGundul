@@ -1,5 +1,5 @@
-import { config } from "../config.js";
-import { log } from "../logger.js";
+import { config } from "../core/config.js";
+import { log } from "../core/logger.js";
 
 // ─── Jupiter datapi trending/toptraded rank (screening source) ──────────────
 // GET https://datapi.jup.ag/v1/pools/{category}/{interval} — the list backing

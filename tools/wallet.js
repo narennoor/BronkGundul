@@ -6,8 +6,8 @@ import {
   Keypair,
 } from "@solana/web3.js";
 import bs58 from "bs58";
-import { log } from "../logger.js";
-import { config } from "../config.js";
+import { log } from "../core/logger.js";
+import { config } from "../core/config.js";
 import { heliusFetch, rpcConnectionKey, activeRpcUrl, rpcConnectionConfig } from "../utils/helius-keys.js";
 
 let _connection = null;

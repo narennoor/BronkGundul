@@ -12,7 +12,7 @@
 // Flags: --from=YYYY-MM-DD (wajib) · --dry-run (walk+validasi, tanpa tulis)
 //        --max-pages=N (default 400)
 
-import { loadEnv } from "../envcrypt.js";
+import { loadEnv } from "../core/envcrypt.js";
 
 loadEnv();
 
@@ -24,7 +24,7 @@ const args = Object.fromEntries(
 );
 
 try {
-  const { seedLedger } = await import("../equity-seed.js");
+  const { seedLedger } = await import("../finance/equity-seed.js");
   const res = await seedLedger({
     from: args.from,
     dryRun: !!args["dry-run"],

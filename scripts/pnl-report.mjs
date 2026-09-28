@@ -1,10 +1,10 @@
 // CLI wrapper: node scripts/pnl-report.mjs
 // Prints the full PnL report (bookkeeping → execution cost → real on-chain cash).
-import { loadEnv } from "../envcrypt.js";
+import { loadEnv } from "../core/envcrypt.js";
 
 loadEnv();
 
-const { computePnlReport, formatPnlReport } = await import("../pnl-report.js");
+const { computePnlReport, formatPnlReport } = await import("../finance/pnl-report.js");
 
 try {
   const report = await computePnlReport();

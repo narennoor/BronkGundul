@@ -26,7 +26,7 @@
 //     `getConnection()` callers rebuild their Connection when
 //     `rpcConnectionKey()` changes — see tools/dlmm.js / tools/wallet.js.
 
-import { log } from "../logger.js";
+import { log } from "../core/logger.js";
 
 const DEFAULT_COOLDOWN_MIN = 30;
 const QUOTA_BODY_RE = /max usage|usage (limit|reached)|credits? (exhausted|limit)|rate ?limit|too many requests/i;

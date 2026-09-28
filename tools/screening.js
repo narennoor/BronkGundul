@@ -1,9 +1,9 @@
-import { config } from "../config.js";
-import { isBlacklisted } from "../token-blacklist.js";
-import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
-import { log } from "../logger.js";
-import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
-import { isBotFilterMintOnCooldown } from "../bot-filter.js";
+import { config } from "../core/config.js";
+import { isBlacklisted } from "../screening/token-blacklist.js";
+import { isDevBlocked, getBlockedDevs } from "../screening/dev-blocklist.js";
+import { log } from "../core/logger.js";
+import { isBaseMintOnCooldown, isPoolOnCooldown } from "../learning/pool-memory.js";
+import { isBotFilterMintOnCooldown } from "../screening/bot-filter.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { getGmgnTrendingTokens, hasGmgnApiKey } from "./gmgn.js";
@@ -846,7 +846,7 @@ export async function discoverPools({
  * Hard filters applied in code, agent decides which to deploy into.
  */
 export async function getTopCandidates({ limit = 10 } = {}) {
-  const { config } = await import("../config.js");
+  const { config } = await import("../core/config.js");
   const discovery = await discoverPools({ page_size: 50 });
   const { pools } = discovery;
   const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
@@ -1034,7 +1034,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   // into the screening path, never changes candidates.
   if (funnelEnabled) {
     try {
-      const { recordFunnelCycle, getFunnelStats, summarizeFunnel } = await import("../funnel-stats.js");
+      const { recordFunnelCycle, getFunnelStats, summarizeFunnel } = await import("../screening/funnel-stats.js");
       const stats = recordFunnelCycle("client", {
         poolsSeen: pools.length,
         passed: eligible.length,
@@ -1084,7 +1084,7 @@ export async function runShadowFunnel() {
     if (failures.length === 0) passed += 1;
     else failuresByPool.push(failures);
   }
-  const { recordFunnelCycle, summarizeFunnel } = await import("../funnel-stats.js");
+  const { recordFunnelCycle, summarizeFunnel } = await import("../screening/funnel-stats.js");
   recordFunnelCycle("shadow", { poolsSeen: rawPools.length, passed, failuresByPool });
   log("funnel", `Shadow run: ${rawPools.length} pools @ volume>=${baselineVolume}, ${passed} pass all thresholds | ${summarizeFunnel("shadow")}`);
 }
