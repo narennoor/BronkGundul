@@ -8,9 +8,9 @@ node_modules
 .envrypt
 
 # User config (contains RPC URL, wallet key, API keys)
-user-config.json
-user-config.era9.json
-user-config.era8.bak.json
+# semua varian config operator (mis. user-config.json.json, backup era) -- hanya contoh yang ikut git
+user-config*.json
+!user-config.example.json
 
 # GMGN fee-source config (contains API key)
 gmgn-config.json
