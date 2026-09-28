@@ -35,10 +35,17 @@ function getWallet() {
 
 const JUPITER_PRICE_API = "https://api.jup.ag/price/v3";
 const JUPITER_SWAP_V2_API = "https://api.jup.ag/swap/v2";
-const DEFAULT_JUPITER_API_KEY = "b15d42e9-e0e4-4f90-a424-ae41ceeaa382";
 
+// Tidak ada kunci bawaan: kunci upstream Meridian yang dulu di-hardcode di sini dihapus (audit rahasia
+// 28 Sep 2026). Tanpa kunci, header x-api-key tidak dikirim dan api.jup.ag bisa menolak permintaan.
+let _jupiterKeyWarned = false;
 function getJupiterApiKey() {
-  return config.jupiter.apiKey || process.env.JUPITER_API_KEY || DEFAULT_JUPITER_API_KEY;
+  const key = config.jupiter.apiKey || process.env.JUPITER_API_KEY || "";
+  if (!key && !_jupiterKeyWarned) {
+    _jupiterKeyWarned = true;
+    log("swap_warn", "JUPITER_API_KEY not set - Jupiter price/swap calls go out without an API key");
+  }
+  return key;
 }
 
 function getJupiterReferralParams() {

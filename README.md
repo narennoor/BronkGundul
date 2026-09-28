@@ -77,7 +77,8 @@ runtime with `node cli.js config set <key> <value>` or the Telegram `/settings`
 menu.
 
 Secrets go in `.env` (`WALLET_PRIVATE_KEY`, `RPC_URL`, `OPENROUTER_API_KEY`,
-`HELIUS_API_KEY`; `JUPITER_API_KEY` optional), never in `user-config.json`.
+`HELIUS_API_KEY`, `JUPITER_API_KEY` from portal.jup.ag for price and swap calls),
+never in `user-config.json`.
 Start from the example with `dryRun: true` and flip it to `false` only after
 a paper run. The operator's own tuned parameter set is kept private.
 
