@@ -38,6 +38,7 @@ import { config } from "./config.js";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
 import { readJsonStore, writeJsonAtomic } from "./utils/json-store.js";
+import { getAllPositionsMap } from "./state.js";
 import { walletChange, fetchAllTxs, fetchBalance } from "./utils/chain-flows.js";
 import {
   loadSnapshots,
@@ -78,8 +79,8 @@ function bookIn(perf, fromMs, toMs) {
 export function buildPrincipalIndex() {
   const intervals = [];
   const seen = new Set();
-  const state = readJsonStore(repoPath("state.json"), { positions: {} });
-  for (const p of Object.values(state.positions || {})) {
+  // Open (state.json) + closed history (state-closed.json).
+  for (const p of Object.values(getAllPositionsMap())) {
     if (p.dry) continue;
     const dep = Date.parse(p.deployed_at);
     if (!Number.isFinite(dep)) continue;

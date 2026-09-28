@@ -28,7 +28,7 @@ import bs58 from "bs58";
 // datapi URL (the fetch itself is injected below). No funds, no chain.
 process.env.WALLET_PRIVATE_KEY ||= bs58.encode(Keypair.generate().secretKey);
 
-const { trackPosition, syncOpenPositions } = await import("../state.js");
+const { trackPosition, syncOpenPositions, getTrackedPosition } = await import("../state.js");
 const { bookkeepSyncAutoClosed } = await import("../tools/dlmm.js");
 const { hasPerformanceRecord } = await import("../lessons.js");
 const { config } = await import("../config.js");
@@ -90,8 +90,9 @@ test("syncOpenPositions returns the auto-closed snapshot (and respects the grace
 });
 
 test("an auto-close the datapi has not indexed is booked with pending cash + a scheduled scan", async () => {
-  const state = JSON.parse(fs.readFileSync(statePath("state.json"), "utf8"));
-  const pos = { position: POS_XST, ...state.positions[POS_XST] };
+  // A closed position is archived out of state.json the moment it closes;
+  // getTrackedPosition follows it into state-closed.json.
+  const pos = { position: POS_XST, ...getTrackedPosition(POS_XST) };
 
   const recheckCalls = [];
   await bookkeepSyncAutoClosed([pos], {
@@ -113,8 +114,9 @@ test("an auto-close the datapi has not indexed is booked with pending cash + a s
 });
 
 test("a second pass over the same position does not double-book", async () => {
-  const state = JSON.parse(fs.readFileSync(statePath("state.json"), "utf8"));
-  const pos = { position: POS_XST, ...state.positions[POS_XST] };
+  // A closed position is archived out of state.json the moment it closes;
+  // getTrackedPosition follows it into state-closed.json.
+  const pos = { position: POS_XST, ...getTrackedPosition(POS_XST) };
 
   const before = readLessons().performance.filter((p) => p.position === POS_XST).length;
   assert.equal(before, 1);

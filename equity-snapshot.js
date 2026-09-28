@@ -34,6 +34,7 @@ import {
   fetchLlmUsage,
   fetchLlmCredits,
 } from "./utils/chain-flows.js";
+import { getAllPositionsMap } from "./state.js";
 
 const DAY_MS = 24 * 3600 * 1000;
 
@@ -133,8 +134,8 @@ function llmKeyId() {
 }
 
 function readStatePositions() {
-  const state = readJsonStore(repoPath("state.json"), { positions: {} });
-  return Object.values(state.positions || {});
+  // Open positions from state.json plus the closed history in state-closed.json.
+  return Object.values(getAllPositionsMap());
 }
 
 export function readPerformanceEntries() {

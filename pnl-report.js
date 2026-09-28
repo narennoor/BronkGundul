@@ -18,6 +18,7 @@ import {
   fetchSolPrice,
   fetchLlmUsage,
 } from "./utils/chain-flows.js";
+import { getAllPositionsMap } from "./state.js";
 
 // Re-exported for existing consumers (unit-tests/pnl-cutoff.test.mjs imports it
 // from here). The implementation lives in utils/chain-flows.js — see the note
@@ -153,7 +154,7 @@ export async function computePnlReport() {
     const lessonsFile = readJson("lessons.json", {});
     perfAll = [...(lessonsFile.performance || []), ...(lessonsFile.performance_archive || [])];
     archivedCount = (lessonsFile.performance_archive || []).length;
-    statePositions = Object.values(readJson("state.json", {}).positions || {});
+    statePositions = Object.values(getAllPositionsMap());   // open (state.json) + closed (state-closed.json)
     const balanceAfterReads = await fetchBalance(wallet);
     flowSum = txs.reduce((s, t) => s + walletChange(t, wallet), 0);
     walkTrusted = walk.complete

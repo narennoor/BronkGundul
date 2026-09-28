@@ -14,6 +14,15 @@ import { repoPath } from "./repo-root.js";
 import { writeJsonAtomic, readJsonStore } from "./utils/json-store.js";
 
 const STATE_FILE = repoPath("state.json");
+// Closed positions are moved here the moment they close (archiveClosedIn) so
+// state.json only ever holds the OPEN ones. It used to keep every position ever
+// opened: by 16 Sep 2026 that was 1,169 entries / 8.9 MB, and because every
+// state.js call is a full load()+save(), the 3s PnL poller was parsing and
+// rewriting ~200 MB of JSON per tick — one whole core pinned, 1.1 TB read in
+// 9 hours, and ticks stretched from 3s to ~10s. Readers that need history
+// (reconcilers, reports, briefing) go through getAllPositionsMap() /
+// getTrackedPositions(false), which merge both files.
+const STATE_CLOSED_FILE = repoPath("state-closed.json");
 
 const MAX_RECENT_EVENTS = 20;
 const MAX_INSTRUCTION_LENGTH = 280;
@@ -46,13 +55,90 @@ function load() {
 function save(state) {
   try {
     state.lastUpdated = new Date().toISOString();
-    // Atomic: temp file + fsync + rename. state.json is ~2.8 MB and rewritten
-    // every ~3s by the PnL poller, so a plain writeFileSync left a wide window
-    // in which any other process read a half-written file.
+    // Atomic: temp file + fsync + rename. state.json is rewritten several
+    // times per PnL tick, so a plain writeFileSync left a wide window in
+    // which any other process read a half-written file.
     writeJsonAtomic(STATE_FILE, state);
   } catch (err) {
     log("state_error", `Failed to write state.json: ${err.message}`);
   }
+}
+
+// ─── Closed-position archive ───────────────────────────────────
+
+// Parsed archive, keyed on the file's mtime+size so a rewrite by this process
+// (cache dropped explicitly) or by any other process (stat changes) is picked
+// up, while the common path — a lookup miss on an open position — costs one
+// stat() instead of a multi-MB parse. Callers must treat the result as
+// read-only; archiveClosedIn builds a fresh object before writing.
+let _closedCache = null;
+
+function loadClosed() {
+  let st;
+  try {
+    st = fs.statSync(STATE_CLOSED_FILE);
+  } catch {
+    return { positions: {}, lastUpdated: null };
+  }
+  const key = `${st.mtimeMs}:${st.size}`;
+  if (_closedCache?.key === key) return _closedCache.data;
+  const data = readJsonStore(STATE_CLOSED_FILE, { positions: {}, lastUpdated: null });
+  if (!data.positions || typeof data.positions !== "object") data.positions = {};
+  _closedCache = { key, data };
+  return data;
+}
+
+/**
+ * Move every `closed` entry of an already-loaded state into the archive file.
+ * The archive is written FIRST; entries are only dropped from `state` once that
+ * write succeeded, so a failed archive write leaves them in state.json (still
+ * flagged closed) for the next close to retry. The caller saves `state`.
+ * Returns the number of entries moved.
+ */
+function archiveClosedIn(state) {
+  const ids = Object.keys(state.positions || {}).filter((id) => state.positions[id]?.closed);
+  if (!ids.length) return 0;
+  try {
+    const current = loadClosed();
+    const archive = { ...current, positions: { ...current.positions } };
+    for (const id of ids) archive.positions[id] = state.positions[id];
+    archive.lastUpdated = new Date().toISOString();
+    writeJsonAtomic(STATE_CLOSED_FILE, archive);
+    _closedCache = null;
+  } catch (err) {
+    log("state_error", `Failed to archive ${ids.length} closed position(s) to state-closed.json: ${err.message}`);
+    return 0;
+  }
+  for (const id of ids) delete state.positions[id];
+  return ids.length;
+}
+
+/**
+ * One-shot sweep: archive any closed positions still sitting in state.json.
+ * Run once at daemon startup (migrates the pre-archive history) — it is cheap
+ * when there is nothing to move. Not for CLI scripts: two processes doing
+ * load+save on state.json can lose each other's writes.
+ */
+export function archiveClosedPositions() {
+  const state = load();
+  const moved = archiveClosedIn(state);
+  if (moved) {
+    save(state);
+    log("state", `Archived ${moved} closed position(s) to state-closed.json`);
+  }
+  return moved;
+}
+
+/**
+ * Every position ever tracked, open and closed, keyed by address — the
+ * pre-archive shape of `state.positions`, for readers that need history.
+ */
+export function getAllPositionsMap() {
+  return { ...loadClosed().positions, ...load().positions };
+}
+
+function findPosition(state, position_address) {
+  return state.positions[position_address] || loadClosed().positions[position_address] || null;
 }
 
 // ─── Position Registry ─────────────────────────────────────────
@@ -220,6 +306,7 @@ export function recordClose(position_address, reason) {
   pos.closed_at = new Date().toISOString();
   pos.notes.push(`Closed at ${pos.closed_at}: ${reason}`);
   pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason });
+  archiveClosedIn(state);
   save(state);
   log("state", `Position ${position_address} marked closed: ${reason}`);
 }
@@ -254,8 +341,8 @@ export function recordCloseTxAttempt(position_address, signature) {
  * Every close/claim signature ever submitted for this position, across attempts.
  */
 export function getCloseTxAttempts(position_address) {
-  const state = load();
-  return state.positions[position_address]?.close_tx_attempts || [];
+  // Falls back to the archive: closePosition reports the attempts AFTER recordClose.
+  return findPosition(load(), position_address)?.close_tx_attempts || [];
 }
 
 /**
@@ -376,8 +463,7 @@ export function registerExitSignal(position_address, signal, confirmTicks = 2, m
  * era #9 blow-ups were +0.7 to +3.9pp.
  */
 export function getTrailingTrace(position_address, trailingDropPct = null) {
-  const state = load();
-  const pos = state.positions[position_address];
+  const pos = findPosition(load(), position_address);
   if (!pos) return null;
 
   const samples = Array.isArray(pos.pnl_samples) ? pos.pnl_samples : [];
@@ -418,17 +504,17 @@ export function getTrailingTrace(position_address, trailingDropPct = null) {
  * Get all tracked positions (optionally filter open-only).
  */
 export function getTrackedPositions(openOnly = false) {
-  const state = load();
-  const all = Object.values(state.positions);
-  return openOnly ? all.filter((p) => !p.closed) : all;
+  const live = Object.values(load().positions);
+  if (openOnly) return live.filter((p) => !p.closed);
+  // Archived (older) first, then whatever is still in state.json.
+  return [...Object.values(loadClosed().positions), ...live];
 }
 
 /**
- * Get a single tracked position.
+ * Get a single tracked position (open, or closed from the archive).
  */
 export function getTrackedPosition(position_address) {
-  const state = load();
-  return state.positions[position_address] || null;
+  return findPosition(load(), position_address);
 }
 
 /**
@@ -436,9 +522,10 @@ export function getTrackedPosition(position_address) {
  */
 export function getStateSummary() {
   const state = load();
-  const open = Object.values(state.positions).filter((p) => !p.closed);
-  const closed = Object.values(state.positions).filter((p) => p.closed);
-  const totalFeesClaimed = Object.values(state.positions)
+  const live = Object.values(state.positions);
+  const open = live.filter((p) => !p.closed);
+  const closed = [...Object.values(loadClosed().positions), ...live.filter((p) => p.closed)];
+  const totalFeesClaimed = [...open, ...closed]
     .reduce((sum, p) => sum + (p.total_fees_claimed_usd || 0), 0);
 
   return {
@@ -659,6 +746,9 @@ export function syncOpenPositions(active_addresses) {
     log("state", `Position ${posId} auto-closed (missing from on-chain data)`);
   }
 
-  if (autoClosed.length) save(state);
+  if (autoClosed.length) {
+    archiveClosedIn(state);
+    save(state);
+  }
   return autoClosed;
 }

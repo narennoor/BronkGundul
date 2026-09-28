@@ -36,7 +36,7 @@ import { buildReportXlsx, buildGroupReportXlsx } from "./financial-xlsx.js";
 import { consolidatePeriod } from "./consolidate.js";
 import { loadRegistry, resolveRegistryPath } from "./ledger-registry.js";
 import { readLedger } from "./ledger-transport.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, archiveClosedPositions } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { evaluateBotFilter } from "./bot-filter.js";
@@ -62,6 +62,14 @@ if (isMain) {
   }
   log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
   log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
+  // Keep state.json to the open positions only (see state.js). Daemon-only:
+  // the sweep is a load+save, which must never race the running process.
+  try {
+    const archived = archiveClosedPositions();
+    if (archived) log("startup", `Moved ${archived} closed position(s) from state.json to state-closed.json`);
+  } catch (error) {
+    log("startup_warn", `Closed-position archive sweep failed: ${error.message}`);
+  }
   ensureAgentId();
   bootstrapHiveMind().catch((error) => log("hivemind_warn", `Bootstrap failed: ${error.message}`));
   startHiveMindBackgroundSync();

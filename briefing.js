@@ -2,19 +2,18 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { getPerformanceSummary } from "./lessons.js";
 import { repoPath } from "./repo-root.js";
+import { getAllPositionsMap } from "./state.js";
 
-const STATE_FILE = repoPath("state.json");
 const LESSONS_FILE = repoPath("lessons.json");
 
 export async function generateBriefing() {
-  const state = loadJson(STATE_FILE) || { positions: {}, recentEvents: [] };
   const lessonsData = loadJson(LESSONS_FILE) || { lessons: [], performance: [] };
 
   const now = new Date();
   const last24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
   // 1. Positions Activity
-  const allPositions = Object.values(state.positions || {});
+  const allPositions = Object.values(getAllPositionsMap());   // open + archived closed
   const openedLast24h = allPositions.filter(p => new Date(p.deployed_at) > last24h);
   const closedLast24h = allPositions.filter(p => p.closed && new Date(p.closed_at) > last24h);
 

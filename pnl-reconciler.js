@@ -17,6 +17,7 @@ import { log } from "./logger.js";
 import { config } from "./config.js";
 import { evaluateCashMismatch } from "./tools/wallet.js";
 import { writeJsonAtomic } from "./utils/json-store.js";
+import { getAllPositionsMap } from "./state.js";
 import { activeRpcUrl, rpcConnectionConfig } from "./utils/helius-keys.js";
 
 const SETTLE_GRACE_MINUTES = 10;  // closes younger than this are still the close path's job
@@ -273,7 +274,8 @@ export async function recheckCash({ positions = [], lookbackHours = 168, dryRun 
   const connection = getRpcConnection();
   const data = readJson("lessons.json", null);
   if (!data?.performance?.length) return { checked: 0, patched: 0, patches: [] };
-  const state = readJson("state.json", { positions: {} });
+  // Open + archived: the deploy signatures of a closed cycle live in state-closed.json.
+  const trackedPositions = getAllPositionsMap();
 
   const wanted = new Set(positions.filter(Boolean));
   const cutoff = Date.now() - lookbackHours * 3600_000;
@@ -290,7 +292,7 @@ export async function recheckCash({ positions = [], lookbackHours = 168, dryRun 
   const results = new Map();
   for (const entry of targets) {
     try {
-      const deploySigs = new Set(state.positions?.[entry.position]?.deploy_txs || []);
+      const deploySigs = new Set(trackedPositions[entry.position]?.deploy_txs || []);
       const swapTx = entry.exit_execution?.swap_tx || null;
       const positionSigs = await allSignaturesForAddress(connection, entry.position);
       const sigs = [...new Set([...positionSigs, ...deploySigs, ...(swapTx ? [swapTx] : [])])];
